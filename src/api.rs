@@ -1,32 +1,63 @@
-use crate::config::Args;
 use crate::git;
-use crate::state::{DeployRecord, StateManager};
+use crate::state::StateManager;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
 use serde::Serialize;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
+    pub targets: HashMap<String, Arc<TargetState>>,
+    pub interval: u64,
+}
+
+/// Per-target configuration and state.
+pub struct TargetState {
+    pub name: String,
+    pub repo: PathBuf,
+    pub remote: String,
+    pub branch: String,
+    pub build_cmd: String,
+    pub artifact: Option<PathBuf>,
+    pub run_cmd: Option<String>,
     pub state: Mutex<StateManager>,
-    pub args: Args,
-    pub polling: std::sync::atomic::AtomicBool,
+}
+
+// ── Response types ──
+
+#[derive(Serialize)]
+struct TargetSummary {
+    name: String,
+    repo: String,
+    branch: String,
+    deployed: Option<crate::state::DeployRecord>,
+    local_commit: Option<String>,
+    remote_commit: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TargetListResponse {
+    targets: Vec<TargetSummary>,
 }
 
 #[derive(Serialize)]
 struct StatusResponse {
-    deployed: Option<DeployRecord>,
+    name: String,
+    repo: String,
+    branch: String,
+    deployed: Option<crate::state::DeployRecord>,
     local_commit: Option<String>,
     remote_commit: Option<String>,
-    branch: String,
-    polling: bool,
     interval_secs: u64,
 }
 
@@ -37,7 +68,7 @@ struct CommitsResponse {
 
 #[derive(Serialize)]
 struct HistoryResponse {
-    history: Vec<DeployRecord>,
+    history: Vec<crate::state::DeployRecord>,
 }
 
 #[derive(Serialize)]
@@ -46,39 +77,68 @@ struct RollbackResponse {
     commit: String,
 }
 
-async fn status(State(s): State<SharedState>) -> Json<StatusResponse> {
-    let (deployed, polling, interval_secs, repo, branch) = {
-        let st = s.state.lock().unwrap();
-        (
-            st.current().clone(),
-            s.polling.load(std::sync::atomic::Ordering::Relaxed),
-            s.args.interval,
-            s.args.repo.clone(),
-            s.args.branch.clone(),
-        )
-    };
+// ── Handlers ──
 
-    Json(StatusResponse {
-        deployed,
-        local_commit: git::local_head(&repo).ok(),
-        remote_commit: git::remote_head(&repo, &s.args.remote, &branch).ok(),
-        branch,
-        polling,
-        interval_secs,
-    })
+/// GET /api/targets
+async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> {
+    let mut summaries: Vec<TargetSummary> = s
+        .targets
+        .iter()
+        .map(|(_, t)| {
+            let st = t.state.lock().unwrap();
+            TargetSummary {
+                name: t.name.clone(),
+                repo: t.repo.display().to_string(),
+                branch: t.branch.clone(),
+                deployed: st.current().clone(),
+                local_commit: git::local_head(&t.repo).ok(),
+                remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
+            }
+        })
+        .collect();
+    summaries.sort_by(|a, b| a.name.cmp(&b.name));
+    Json(TargetListResponse { targets: summaries })
 }
 
-async fn commits(State(s): State<SharedState>) -> Result<Json<CommitsResponse>, StatusCode> {
-    git::recent_commits(&s.args.repo, 20)
+/// GET /api/targets/:name/status
+async fn target_status(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<StatusResponse>, StatusCode> {
+    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let deployed = { t.state.lock().unwrap().current().clone() };
+    Ok(Json(StatusResponse {
+        name: t.name.clone(),
+        repo: t.repo.display().to_string(),
+        branch: t.branch.clone(),
+        deployed,
+        local_commit: git::local_head(&t.repo).ok(),
+        remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
+        interval_secs: s.interval,
+    }))
+}
+
+/// GET /api/targets/:name/commits
+async fn target_commits(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<CommitsResponse>, StatusCode> {
+    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    git::recent_commits(&t.repo, 20)
         .map(|commits| Json(CommitsResponse { commits }))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn history(State(s): State<SharedState>) -> Json<HistoryResponse> {
-    let st = s.state.lock().unwrap();
-    Json(HistoryResponse {
+/// GET /api/targets/:name/history
+async fn target_history(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<HistoryResponse>, StatusCode> {
+    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let st = t.state.lock().unwrap();
+    Ok(Json(HistoryResponse {
         history: st.history().to_vec(),
-    })
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -86,29 +146,32 @@ struct RollbackBody {
     commit: String,
 }
 
-async fn rollback(
+/// POST /api/targets/:name/rollback
+async fn target_rollback(
     State(s): State<SharedState>,
+    Path(name): Path<String>,
     Json(body): Json<RollbackBody>,
 ) -> Result<Json<RollbackResponse>, (StatusCode, String)> {
-    let repo = &s.args.repo;
+    let t = s
+        .targets
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    git::checkout(repo, &body.commit).map_err(|e| {
+    git::checkout(&t.repo, &body.commit).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    let artifact = s.args.artifact.as_deref();
-    let run = s.args.run.as_deref();
+    let artifact = t.artifact.as_deref();
+    let run = t.run_cmd.as_deref();
 
-    // Try cache first
-    let used_cache = try_rollback_with_cache(repo, &body.commit, artifact, run, &s.state)
+    let used_cache = try_rollback_with_cache(&t.repo, &body.commit, artifact, run, &t.state)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    // Cache miss → full build
     if !used_cache {
         build_and_cache(
-            repo, &s.args.remote, &s.args.branch,
-            &s.args.build, artifact, run,
-            &body.commit, &s.state,
+            &t.repo, &t.remote, &t.branch,
+            &t.build_cmd, artifact, run,
+            &body.commit, &t.state,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -120,24 +183,28 @@ async fn rollback(
     }))
 }
 
-async fn deploy_now(
+/// POST /api/targets/:name/deploy
+async fn target_deploy(
     State(s): State<SharedState>,
+    Path(name): Path<String>,
 ) -> Result<Json<RollbackResponse>, (StatusCode, String)> {
-    let repo = &s.args.repo;
-    let branch = &s.args.branch;
+    let t = s
+        .targets
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let remote = git::remote_head(repo, &s.args.remote, branch).map_err(|e| {
+    let remote = git::remote_head(&t.repo, &t.remote, &t.branch).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
-    git::pull(repo, &s.args.remote, branch).map_err(|e| {
+    git::pull(&t.repo, &t.remote, &t.branch).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
 
     build_and_cache(
-        repo, &s.args.remote, branch,
-        &s.args.build, s.args.artifact.as_deref(), s.args.run.as_deref(),
-        &remote, &s.state,
+        &t.repo, &t.remote, &t.branch,
+        &t.build_cmd, t.artifact.as_deref(), t.run_cmd.as_deref(),
+        &remote, &t.state,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -148,13 +215,14 @@ async fn deploy_now(
     }))
 }
 
-/// Build, cache artifact, and record deployment. Shared by poller and manual deploy.
+// ── Build & Cache (shared) ──
+
 pub async fn build_and_cache(
-    repo: &Path,
+    repo: &std::path::Path,
     _remote: &str,
     _branch: &str,
     build_cmd: &str,
-    artifact_rel: Option<&Path>,
+    artifact_rel: Option<&std::path::Path>,
     run_cmd: Option<&str>,
     commit_hash: &str,
     state: &Mutex<StateManager>,
@@ -171,11 +239,11 @@ pub async fn build_and_cache(
 
     let success = status.success();
 
-    // Cache artifact on success
     let cache_path = if success {
         if let Some(artifact) = artifact_rel {
             let st = state.lock().unwrap();
-            let short = crate::git::short_hash(repo, commit_hash).unwrap_or_else(|_| commit_hash[..7].to_string());
+            let short = crate::git::short_hash(repo, commit_hash)
+                .unwrap_or_else(|_| commit_hash[..7].to_string());
             st.cache_artifact(&short, artifact).ok()
         } else {
             None
@@ -184,7 +252,6 @@ pub async fn build_and_cache(
         None
     };
 
-    // Run if configured
     if let Some(ref cmd) = run_cmd {
         let _ = Command::new(shell)
             .args([flag, cmd])
@@ -193,24 +260,25 @@ pub async fn build_and_cache(
     }
 
     let mut st = state.lock().unwrap();
-    let short = crate::git::short_hash(repo, commit_hash).unwrap_or_else(|_| commit_hash[..7].to_string());
+    let short = crate::git::short_hash(repo, commit_hash)
+        .unwrap_or_else(|_| commit_hash[..7].to_string());
     st.record_deploy(commit_hash.to_string(), short, cache_path, success)?;
 
     Ok(())
 }
 
-/// Try to rollback using cached artifact. Returns true if cache was used (no rebuild).
 pub fn try_rollback_with_cache(
-    repo: &Path,
+    repo: &std::path::Path,
     commit_hash: &str,
-    artifact_rel: Option<&Path>,
+    artifact_rel: Option<&std::path::Path>,
     run_cmd: Option<&str>,
     state: &Mutex<StateManager>,
 ) -> anyhow::Result<bool> {
     use std::process::Command;
 
     let st = state.lock().unwrap();
-    let short = crate::git::short_hash(repo, commit_hash).unwrap_or_else(|_| commit_hash[..7].to_string());
+    let short = crate::git::short_hash(repo, commit_hash)
+        .unwrap_or_else(|_| commit_hash[..7].to_string());
 
     let cache_hit = artifact_rel.and_then(|a| {
         let fname = a.file_name()?;
@@ -218,9 +286,8 @@ pub fn try_rollback_with_cache(
     });
 
     if let Some(cache_path) = cache_hit {
-        drop(st); // release lock before spawning
+        drop(st);
 
-        // Run from cache
         if let Some(ref cmd) = run_cmd {
             let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
             let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
@@ -238,12 +305,15 @@ pub fn try_rollback_with_cache(
     }
 }
 
+// ── Router ──
+
 pub fn router(state: SharedState) -> Router {
     Router::new()
-        .route("/api/status", get(status))
-        .route("/api/commits", get(commits))
-        .route("/api/history", get(history))
-        .route("/api/rollback", post(rollback))
-        .route("/api/deploy", post(deploy_now))
+        .route("/api/targets", get(list_targets))
+        .route("/api/targets/{name}/status", get(target_status))
+        .route("/api/targets/{name}/commits", get(target_commits))
+        .route("/api/targets/{name}/history", get(target_history))
+        .route("/api/targets/{name}/rollback", post(target_rollback))
+        .route("/api/targets/{name}/deploy", post(target_deploy))
         .with_state(state)
 }

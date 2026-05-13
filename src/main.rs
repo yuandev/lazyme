@@ -2,9 +2,10 @@ mod api;
 mod config;
 mod git;
 mod project;
+mod registry;
 mod state;
 
-use api::AppState;
+use api::{AppState, TargetState};
 use axum::{
     body::Body,
     http::{header, StatusCode},
@@ -12,8 +13,11 @@ use axum::{
 };
 use clap::Parser;
 use rust_embed::RustEmbed;
-use std::sync::{Arc, Mutex};
-use tracing::{error, info};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tracing::{error, info, warn};
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
@@ -23,41 +27,55 @@ struct Frontend;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut args = config::Args::parse();
+    let args = config::Args::parse();
 
-    // Overlay project config (.deployd/config.toml) onto CLI defaults
-    if let Ok(Some(proj)) = project::ProjectConfig::load(&args.repo, args.profile.as_deref()) {
-        if let Some(cmd) = proj.build.command {
-            if args.build == "cargo build --release" { args.build = cmd; }
-        }
-        if let Some(a) = proj.build.artifact {
-            if args.artifact.is_none() { args.artifact = Some(a.into()); }
-        }
-        if let Some(cmd) = proj.run.command {
-            if args.run.is_none() { args.run = Some(cmd); }
-        }
-        if let Some(b) = proj.watch.branch {
-            if args.branch == "main" { args.branch = b; }
-        }
+    // Load target registry
+    let targets = registry::load()?;
+    let targets = registry::filter(targets, &args.filter);
+    if targets.is_empty() {
+        anyhow::bail!("No targets found. Check ~/.config/lazyme/targets.toml");
     }
 
-    let state = Arc::new(AppState {
-        state: Mutex::new(state::StateManager::new(&args.repo)),
-        args: args.clone(),
-        polling: std::sync::atomic::AtomicBool::new(true),
+    // Build per-target state
+    let mut target_map = HashMap::new();
+    for entry in &targets {
+        let proj = project::ProjectConfig::load(&entry.repo, entry.profile.as_deref())
+            .unwrap_or_default()
+            .unwrap_or_default();
+
+        let branch = proj.watch.branch.unwrap_or_else(|| "main".into());
+        let build_cmd = proj.build.command.unwrap_or_else(|| "cargo build --release".into());
+        let artifact = proj.build.artifact.map(std::path::PathBuf::from);
+        let run_cmd = proj.run.command;
+
+        let ts = Arc::new(TargetState {
+            name: entry.name.clone(),
+            repo: entry.repo.clone(),
+            remote: args.remote.clone(),
+            branch,
+            build_cmd,
+            artifact,
+            run_cmd,
+            state: Mutex::new(state::StateManager::new(&entry.repo)),
+        });
+
+        target_map.insert(entry.name.clone(), ts);
+        info!("Target '{}' registered ({})", entry.name, entry.repo.display());
+    }
+
+    let shared = Arc::new(AppState {
+        targets: target_map,
+        interval: args.interval,
     });
 
-    info!("Deployd started, watching {} branch {}", args.repo.display(), args.branch);
+    // Start one poller per target
+    for target in shared.targets.values() {
+        let t = target.clone();
+        let interval = args.interval;
+        tokio::spawn(async move { poll_loop(t, interval).await });
+    }
 
-    // Start poller
-    let poller_state = state.clone();
-    tokio::spawn(async move {
-        poll_loop(poller_state).await;
-    });
-
-    // Build router
-    let app = api::router(state)
-        .fallback(serve_frontend);
+    let app = api::router(shared).fallback(serve_frontend);
 
     let addr = format!("0.0.0.0:{}", args.port);
     info!("Web UI at http://localhost:{}", args.port);
@@ -66,6 +84,61 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+async fn poll_loop(target: Arc<TargetState>, interval_secs: u64) {
+    let interval = tokio::time::Duration::from_secs(interval_secs);
+    tokio::time::sleep(interval).await;
+    let mut timer = tokio::time::interval(interval);
+
+    loop {
+        timer.tick().await;
+
+        let remote = match git::remote_head(&target.repo, &target.remote, &target.branch) {
+            Ok(h) => h,
+            Err(e) => {
+                warn!("[{}] remote check failed: {e}", target.name);
+                continue;
+            }
+        };
+
+        if remote.is_empty() {
+            continue;
+        }
+
+        let deployed = {
+            let st = target.state.lock().unwrap();
+            st.current().as_ref().map(|r| r.commit_hash.clone())
+        };
+
+        if deployed.as_deref() == Some(&remote) {
+            continue;
+        }
+
+        info!("[{}] new commit: {remote}, pulling...", target.name);
+
+        if let Err(e) = git::pull(&target.repo, &target.remote, &target.branch) {
+            error!("[{}] pull failed: {e}", target.name);
+            continue;
+        }
+
+        if let Err(e) = api::build_and_cache(
+            &target.repo,
+            &target.remote,
+            &target.branch,
+            &target.build_cmd,
+            target.artifact.as_deref(),
+            target.run_cmd.as_deref(),
+            &remote,
+            &target.state,
+        )
+        .await
+        {
+            error!("[{}] build/deploy failed: {e}", target.name);
+        } else {
+            info!("[{}] deployed {remote}", target.name);
+        }
+    }
 }
 
 async fn serve_frontend(uri: axum::http::Uri) -> Response<Body> {
@@ -81,7 +154,6 @@ async fn serve_frontend(uri: axum::http::Uri) -> Response<Body> {
             .unwrap();
     }
 
-    // SPA fallback: return index.html for unmatched routes
     if let Some(file) = Frontend::get("index.html") {
         return Response::builder()
             .status(StatusCode::OK)
@@ -94,66 +166,4 @@ async fn serve_frontend(uri: axum::http::Uri) -> Response<Body> {
         .status(StatusCode::NOT_FOUND)
         .body(Body::from("Not found"))
         .unwrap()
-}
-
-async fn poll_loop(state: Arc<AppState>) {
-    let interval = tokio::time::Duration::from_secs(state.args.interval);
-    // Wait one interval before first poll, so the server is ready
-    tokio::time::sleep(interval).await;
-    let mut timer = tokio::time::interval(interval);
-
-    loop {
-        timer.tick().await;
-        if !state.polling.load(std::sync::atomic::Ordering::Relaxed) {
-            continue;
-        }
-
-        let repo = &state.args.repo;
-        let branch = &state.args.branch;
-
-        let remote = match git::remote_head(repo, &state.args.remote, branch) {
-            Ok(h) => h,
-            Err(e) => {
-                error!("Failed to check remote: {e}");
-                continue;
-            }
-        };
-
-        if remote.is_empty() {
-            continue;
-        }
-
-        let deployed_commit = {
-            let st = state.state.lock().unwrap();
-            st.current().as_ref().map(|r| r.commit_hash.clone())
-        };
-
-        if deployed_commit.as_deref() == Some(&remote) {
-            continue; // up to date
-        }
-
-        info!("New commit detected: {remote}, pulling...");
-
-        if let Err(e) = git::pull(repo, &state.args.remote, branch) {
-            error!("Pull failed: {e}");
-            continue;
-        }
-
-        if let Err(e) = api::build_and_cache(
-            repo,
-            &state.args.remote,
-            branch,
-            &state.args.build,
-            state.args.artifact.as_deref(),
-            state.args.run.as_deref(),
-            &remote,
-            &state.state,
-        )
-        .await
-        {
-            error!("Build/deploy failed for {remote}: {e}");
-        } else {
-            info!("Deployed {remote}");
-        }
-    }
 }
