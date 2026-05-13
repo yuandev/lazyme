@@ -12,7 +12,7 @@ pub struct Args {
     #[arg(short = 'R', long, default_value = "origin")]
     pub remote: String,
 
-    /// Branch to watch
+    /// Branch to watch (default: main, overridden by .deployd/config.toml)
     #[arg(short, long, default_value = "main")]
     pub branch: String,
 
@@ -20,7 +20,7 @@ pub struct Args {
     #[arg(short, long, default_value_t = 60)]
     pub interval: u64,
 
-    /// Build command (e.g. "cargo build --release")
+    /// Build command (default: "cargo build --release", overridden by config)
     #[arg(short = 'B', long, default_value = "cargo build --release")]
     pub build: String,
 
@@ -31,6 +31,10 @@ pub struct Args {
     /// Command to run the app after deploy (optional)
     #[arg(short = 'x', long)]
     pub run: Option<String>,
+
+    /// Profile name in .deployd/ (loads config.{profile}.toml)
+    #[arg(long)]
+    pub profile: Option<String>,
 
     /// Port for the web UI
     #[arg(short = 'p', long, default_value_t = 8080)]

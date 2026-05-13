@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod git;
+mod project;
 mod state;
 
 use api::AppState;
@@ -22,7 +23,24 @@ struct Frontend;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let args = config::Args::parse();
+    let mut args = config::Args::parse();
+
+    // Overlay project config (.deployd/config.toml) onto CLI defaults
+    if let Ok(Some(proj)) = project::ProjectConfig::load(&args.repo, args.profile.as_deref()) {
+        if let Some(cmd) = proj.build.command {
+            if args.build == "cargo build --release" { args.build = cmd; }
+        }
+        if let Some(a) = proj.build.artifact {
+            if args.artifact.is_none() { args.artifact = Some(a.into()); }
+        }
+        if let Some(cmd) = proj.run.command {
+            if args.run.is_none() { args.run = Some(cmd); }
+        }
+        if let Some(b) = proj.watch.branch {
+            if args.branch == "main" { args.branch = b; }
+        }
+    }
+
     let state = Arc::new(AppState {
         state: Mutex::new(state::StateManager::new(&args.repo)),
         args: args.clone(),
