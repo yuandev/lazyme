@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod git;
+mod process;
 mod project;
 mod registry;
 mod state;
@@ -47,6 +48,8 @@ async fn main() -> anyhow::Result<()> {
         let build_cmd = proj.build.command.unwrap_or_else(|| "cargo build --release".into());
         let artifact = proj.build.artifact.map(std::path::PathBuf::from);
         let run_cmd = proj.run.command;
+        let health_url = proj.run.health_url;
+        let health_timeout = proj.run.health_timeout;
 
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
@@ -56,6 +59,9 @@ async fn main() -> anyhow::Result<()> {
             build_cmd,
             artifact,
             run_cmd,
+            health_url,
+            health_timeout,
+            process: Mutex::new(None),
             state: Mutex::new(state::StateManager::new(&entry.repo)),
         });
 
@@ -128,9 +134,12 @@ async fn poll_loop(target: Arc<TargetState>, interval_secs: u64) {
             &target.branch,
             &target.build_cmd,
             target.artifact.as_deref(),
-            target.run_cmd.as_deref(),
             &remote,
             &target.state,
+            &target.process,
+            target.run_cmd.as_deref(),
+            target.health_url.as_deref(),
+            target.health_timeout,
         )
         .await
         {

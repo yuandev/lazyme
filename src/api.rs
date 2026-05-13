@@ -1,4 +1,5 @@
 use crate::git;
+use crate::process::{self, ManagedProcess};
 use crate::state::StateManager;
 use axum::{
     extract::{Path, State},
@@ -30,7 +31,10 @@ pub struct TargetState {
     pub build_cmd: String,
     pub artifact: Option<PathBuf>,
     pub run_cmd: Option<String>,
+    pub health_url: Option<String>,
+    pub health_timeout: u64,
     pub state: Mutex<StateManager>,
+    pub process: Mutex<Option<ManagedProcess>>,
 }
 
 // ── Response types ──
@@ -43,6 +47,8 @@ struct TargetSummary {
     deployed: Option<crate::state::DeployRecord>,
     local_commit: Option<String>,
     remote_commit: Option<String>,
+    process_running: bool,
+    health_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -59,6 +65,8 @@ struct StatusResponse {
     local_commit: Option<String>,
     remote_commit: Option<String>,
     interval_secs: u64,
+    process_running: bool,
+    health_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -86,6 +94,7 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
         .iter()
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
+            let running = t.process.lock().unwrap().is_some();
             TargetSummary {
                 name: t.name.clone(),
                 repo: t.repo.display().to_string(),
@@ -93,6 +102,8 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
                 deployed: st.current().clone(),
                 local_commit: git::local_head(&t.repo).ok(),
                 remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
+                process_running: running,
+                health_url: t.health_url.clone(),
             }
         })
         .collect();
@@ -107,6 +118,7 @@ async fn target_status(
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
     let deployed = { t.state.lock().unwrap().current().clone() };
+    let running = { t.process.lock().unwrap().is_some() };
     Ok(Json(StatusResponse {
         name: t.name.clone(),
         repo: t.repo.display().to_string(),
@@ -115,6 +127,8 @@ async fn target_status(
         local_commit: git::local_head(&t.repo).ok(),
         remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
         interval_secs: s.interval,
+        process_running: running,
+        health_url: t.health_url.clone(),
     }))
 }
 
@@ -163,15 +177,19 @@ async fn target_rollback(
 
     let artifact = t.artifact.as_deref();
     let run = t.run_cmd.as_deref();
+    let health = t.health_url.as_deref();
+    let health_to = t.health_timeout;
 
-    let used_cache = try_rollback_with_cache(&t.repo, &body.commit, artifact, run, &t.state)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let used_cache = try_rollback_with_cache(
+        &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to,
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !used_cache {
         build_and_cache(
             &t.repo, &t.remote, &t.branch,
-            &t.build_cmd, artifact, run,
-            &body.commit, &t.state,
+            &t.build_cmd, artifact,
+            &body.commit, &t.state, &t.process, run, health, health_to,
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -203,8 +221,9 @@ async fn target_deploy(
 
     build_and_cache(
         &t.repo, &t.remote, &t.branch,
-        &t.build_cmd, t.artifact.as_deref(), t.run_cmd.as_deref(),
-        &remote, &t.state,
+        &t.build_cmd, t.artifact.as_deref(),
+        &remote, &t.state, &t.process,
+        t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -223,9 +242,12 @@ pub async fn build_and_cache(
     _branch: &str,
     build_cmd: &str,
     artifact_rel: Option<&std::path::Path>,
-    run_cmd: Option<&str>,
     commit_hash: &str,
     state: &Mutex<StateManager>,
+    process: &Mutex<Option<ManagedProcess>>,
+    run_cmd: Option<&str>,
+    health_url: Option<&str>,
+    health_timeout: u64,
 ) -> anyhow::Result<()> {
     use std::process::Command;
 
@@ -252,11 +274,31 @@ pub async fn build_and_cache(
         None
     };
 
+    // Kill old process, start new one
     if let Some(ref cmd) = run_cmd {
-        let _ = Command::new(shell)
-            .args([flag, cmd])
-            .current_dir(repo)
-            .spawn();
+        let mut proc = process.lock().unwrap();
+        if let Some(ref mut old) = *proc {
+            old.kill();
+        }
+        let resolved = if let Some(art) = artifact_rel {
+            cmd.replace("{artifact}", &art.display().to_string())
+        } else {
+            cmd.to_string()
+        };
+        match ManagedProcess::spawn(&resolved, repo) {
+            Ok(p) => *proc = Some(p),
+            Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
+        }
+        drop(proc);
+    }
+
+    // Health check
+    if success && run_cmd.is_some() {
+        if let Some(url) = health_url {
+            if !process::health_check(url, health_timeout).await {
+                tracing::warn!("Health check failed for {url}");
+            }
+        }
     }
 
     let mut st = state.lock().unwrap();
@@ -271,11 +313,12 @@ pub fn try_rollback_with_cache(
     repo: &std::path::Path,
     commit_hash: &str,
     artifact_rel: Option<&std::path::Path>,
-    run_cmd: Option<&str>,
     state: &Mutex<StateManager>,
+    process: &Mutex<Option<ManagedProcess>>,
+    run_cmd: Option<&str>,
+    _health_url: Option<&str>,
+    _health_timeout: u64,
 ) -> anyhow::Result<bool> {
-    use std::process::Command;
-
     let st = state.lock().unwrap();
     let short = crate::git::short_hash(repo, commit_hash)
         .unwrap_or_else(|_| commit_hash[..7].to_string());
@@ -288,13 +331,22 @@ pub fn try_rollback_with_cache(
     if let Some(cache_path) = cache_hit {
         drop(st);
 
+        // Kill old process, start new one
         if let Some(ref cmd) = run_cmd {
-            let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-            let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
-            let _ = Command::new(shell)
-                .args([flag, cmd])
-                .current_dir(repo)
-                .spawn();
+            let mut proc = process.lock().unwrap();
+            if let Some(ref mut old) = *proc {
+                old.kill();
+            }
+            let resolved = if let Some(art) = artifact_rel {
+                cmd.replace("{artifact}", &art.display().to_string())
+            } else {
+                cmd.to_string()
+            };
+            match ManagedProcess::spawn(&resolved, repo) {
+                Ok(p) => *proc = Some(p),
+                Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
+            }
+            drop(proc);
         }
 
         let mut st = state.lock().unwrap();
