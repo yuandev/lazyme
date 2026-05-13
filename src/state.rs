@@ -1,13 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeployRecord {
     pub commit_hash: String,
+    pub short_hash: String,
     pub deployed_at: DateTime<Utc>,
-    pub artifact_path: Option<PathBuf>,
+    pub cache_path: Option<PathBuf>,
     pub success: bool,
 }
 
@@ -18,19 +19,20 @@ pub struct DeploymentState {
 }
 
 pub struct StateManager {
-    path: PathBuf,
+    state_path: PathBuf,
+    repo_path: PathBuf,
     state: DeploymentState,
 }
 
 impl StateManager {
-    pub fn new(repo_path: &std::path::Path) -> Self {
+    pub fn new(repo_path: &Path) -> Self {
         let deploy_dir = repo_path.join(".deployd");
-        let path = deploy_dir.join("state.json");
-        let state = std::fs::read_to_string(&path)
+        let state_path = deploy_dir.join("state.json");
+        let state = std::fs::read_to_string(&state_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { path, state }
+        Self { state_path, repo_path: repo_path.to_path_buf(), state }
     }
 
     pub fn current(&self) -> &Option<DeployRecord> {
@@ -41,16 +43,56 @@ impl StateManager {
         &self.state.history
     }
 
+    pub fn deploy_dir(&self) -> PathBuf {
+        self.repo_path.join(".deployd")
+    }
+
+    pub fn cache_dir(&self, short_hash: &str) -> PathBuf {
+        self.deploy_dir().join("artifacts").join(short_hash)
+    }
+
+    /// Check if a cached artifact exists for a given short hash + filename.
+    /// Returns the full cache path if it exists.
+    pub fn find_cached_artifact(&self, short_hash: &str, artifact_name: &str) -> Option<PathBuf> {
+        let path = self.cache_dir(short_hash).join(artifact_name);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    }
+
+    /// Copy the built artifact into the cache directory for a commit.
+    pub fn cache_artifact(
+        &self,
+        short_hash: &str,
+        artifact_rel: &Path,
+    ) -> Result<PathBuf> {
+        let cache_dir = self.cache_dir(short_hash);
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let src = self.repo_path.join(artifact_rel);
+        let fname = src.file_name().context("artifact has no filename")?;
+        let dst = cache_dir.join(fname);
+
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copy artifact from {} to {}", src.display(), dst.display()))?;
+
+        Ok(dst)
+    }
+
     pub fn record_deploy(
         &mut self,
         commit_hash: String,
-        artifact_path: Option<PathBuf>,
+        short_hash: String,
+        cache_path: Option<PathBuf>,
         success: bool,
     ) -> Result<()> {
         let record = DeployRecord {
             commit_hash,
+            short_hash,
             deployed_at: Utc::now(),
-            artifact_path,
+            cache_path,
             success,
         };
 
@@ -65,11 +107,11 @@ impl StateManager {
     }
 
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
+        if let Some(parent) = self.state_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.state)?;
-        std::fs::write(&self.path, json)?;
+        std::fs::write(&self.state_path, json)?;
         Ok(())
     }
 }

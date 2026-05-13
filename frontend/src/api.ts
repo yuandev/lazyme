@@ -1,7 +1,8 @@
 export interface DeployRecord {
   commit_hash: string;
+  short_hash: string;
   deployed_at: string;
-  artifact_path: string | null;
+  cache_path: string | null;
   success: boolean;
 }
 

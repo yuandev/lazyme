@@ -157,8 +157,9 @@ function HistoryPanel({ history }: { history: DeployRecord[] }) {
         <div style={s.list}>
           {reversed.map((h, i) => (
             <div key={i} style={s.listItem}>
-              <code style={s.hash}>{h.commit_hash.substring(0, 7)}</code>
+              <code style={s.hash}>{h.short_hash}</code>
               <span style={s.msg}>{new Date(h.deployed_at).toLocaleString()}</span>
+              {h.cache_path && <span style={s.badgeCache}>cached</span>}
               <span style={h.success ? s.badgeGreen : s.badgeYellow}>
                 {h.success ? 'ok' : 'fail'}
               </span>
@@ -194,6 +195,7 @@ const s: Record<string, React.CSSProperties> = {
   btnDisabled: { opacity: 0.4, cursor: 'default' },
   badgeGreen: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#166534', color: '#4ade80' },
   badgeYellow: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#713f12', color: '#facc15' },
+  badgeCache: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#1e3a5f', color: '#7dd3fc' },
   empty: { color: '#64748b', padding: '1rem 0' },
 };
 

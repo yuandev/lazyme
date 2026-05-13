@@ -121,32 +121,21 @@ async fn poll_loop(state: Arc<AppState>) {
             continue;
         }
 
-        // Run build
-        let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
-        let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
-
-        let status = std::process::Command::new(shell)
-            .args([flag, &state.args.build])
-            .current_dir(repo)
-            .status();
-
-        let success = status.map(|s| s.success()).unwrap_or(false);
-
-        if success {
-            info!("Build succeeded for {remote}");
+        if let Err(e) = api::build_and_cache(
+            repo,
+            &state.args.remote,
+            branch,
+            &state.args.build,
+            state.args.artifact.as_deref(),
+            state.args.run.as_deref(),
+            &remote,
+            &state.state,
+        )
+        .await
+        {
+            error!("Build/deploy failed for {remote}: {e}");
         } else {
-            error!("Build failed for {remote}");
+            info!("Deployed {remote}");
         }
-
-        // Run the app if configured
-        if let Some(ref run_cmd) = state.args.run {
-            let _ = std::process::Command::new(shell)
-                .args([flag, run_cmd])
-                .current_dir(repo)
-                .spawn();
-        }
-
-        let mut st = state.state.lock().unwrap();
-        let _ = st.record_deploy(remote, state.args.artifact.clone(), success);
     }
 }
