@@ -19,6 +19,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tracing::{error, info, warn};
+use tokio::sync::broadcast;
 
 #[derive(RustEmbed)]
 #[folder = "frontend/dist/"]
@@ -69,16 +70,20 @@ async fn main() -> anyhow::Result<()> {
         info!("Target '{}' registered ({})", entry.name, entry.repo.display());
     }
 
+    let (tx, _rx) = broadcast::channel::<api::WsEvent>(64);
+
     let shared = Arc::new(AppState {
         targets: target_map,
         interval: args.interval,
+        tx,
     });
 
     // Start one poller per target
     for target in shared.targets.values() {
         let t = target.clone();
         let interval = args.interval;
-        tokio::spawn(async move { poll_loop(t, interval).await });
+        let tx = shared.tx.clone();
+        tokio::spawn(async move { poll_loop(t, interval, tx).await });
     }
 
     let app = api::router(shared).fallback(serve_frontend);
@@ -92,7 +97,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn poll_loop(target: Arc<TargetState>, interval_secs: u64) {
+async fn poll_loop(
+    target: Arc<TargetState>,
+    interval_secs: u64,
+    tx: broadcast::Sender<api::WsEvent>,
+) {
     let interval = tokio::time::Duration::from_secs(interval_secs);
     tokio::time::sleep(interval).await;
     let mut timer = tokio::time::interval(interval);
@@ -140,6 +149,8 @@ async fn poll_loop(target: Arc<TargetState>, interval_secs: u64) {
             target.run_cmd.as_deref(),
             target.health_url.as_deref(),
             target.health_timeout,
+            Some(&tx),
+            &target.name,
         )
         .await
         {

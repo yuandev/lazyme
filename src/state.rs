@@ -9,6 +9,7 @@ pub struct DeployRecord {
     pub short_hash: String,
     pub deployed_at: DateTime<Utc>,
     pub cache_path: Option<PathBuf>,
+    pub log_path: Option<PathBuf>,
     pub success: bool,
 }
 
@@ -86,6 +87,7 @@ impl StateManager {
         commit_hash: String,
         short_hash: String,
         cache_path: Option<PathBuf>,
+        log_path: Option<PathBuf>,
         success: bool,
     ) -> Result<()> {
         let record = DeployRecord {
@@ -93,6 +95,7 @@ impl StateManager {
             short_hash,
             deployed_at: Utc::now(),
             cache_path,
+            log_path,
             success,
         };
 
