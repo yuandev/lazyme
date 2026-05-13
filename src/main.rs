@@ -3,6 +3,7 @@ mod config;
 mod git;
 mod process;
 mod project;
+mod queue;
 mod registry;
 mod state;
 
@@ -71,11 +72,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let (tx, _rx) = broadcast::channel::<api::WsEvent>(64);
+    let build_lock = Arc::new(queue::BuildLock::new());
 
     let shared = Arc::new(AppState {
         targets: target_map,
         interval: args.interval,
         tx,
+        build_lock: build_lock.clone(),
     });
 
     // Start one poller per target
@@ -83,7 +86,8 @@ async fn main() -> anyhow::Result<()> {
         let t = target.clone();
         let interval = args.interval;
         let tx = shared.tx.clone();
-        tokio::spawn(async move { poll_loop(t, interval, tx).await });
+        let lock = build_lock.clone();
+        tokio::spawn(async move { poll_loop(t, interval, tx, lock).await });
     }
 
     let app = api::router(shared).fallback(serve_frontend);
@@ -101,6 +105,7 @@ async fn poll_loop(
     target: Arc<TargetState>,
     interval_secs: u64,
     tx: broadcast::Sender<api::WsEvent>,
+    build_lock: Arc<queue::BuildLock>,
 ) {
     let interval = tokio::time::Duration::from_secs(interval_secs);
     tokio::time::sleep(interval).await;
@@ -137,6 +142,10 @@ async fn poll_loop(
             continue;
         }
 
+        // Acquire build lock to serialize builds across targets
+        let _guard = build_lock.inner.lock().await;
+        build_lock.set_current(Some(target.name.clone()));
+
         if let Err(e) = api::build_and_cache(
             &target.repo,
             &target.remote,
@@ -158,6 +167,8 @@ async fn poll_loop(
         } else {
             info!("[{}] deployed {remote}", target.name);
         }
+
+        build_lock.set_current(None);
     }
 }
 

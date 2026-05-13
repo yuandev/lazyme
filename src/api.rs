@@ -1,5 +1,6 @@
 use crate::git;
 use crate::process::{self, ManagedProcess};
+use crate::queue::BuildLock;
 use crate::state::StateManager;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -23,6 +24,7 @@ pub struct AppState {
     pub targets: HashMap<String, Arc<TargetState>>,
     pub interval: u64,
     pub tx: broadcast::Sender<WsEvent>,
+    pub build_lock: Arc<BuildLock>,
 }
 
 /// Per-target configuration and state.
@@ -268,6 +270,10 @@ async fn target_rollback(
         message: None,
     });
 
+    // Serialize builds
+    let _guard = s.build_lock.inner.lock().await;
+    s.build_lock.set_current(Some(t.name.clone()));
+
     let used_cache = try_rollback_with_cache(
         &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to,
     )
@@ -283,6 +289,9 @@ async fn target_rollback(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
+
+    s.build_lock.set_current(None);
+    drop(_guard);
 
     let _ = s.tx.send(WsEvent {
         event: "rollback_complete".into(),
@@ -320,6 +329,10 @@ async fn target_deploy(
         message: None,
     });
 
+    // Serialize builds
+    let _guard = s.build_lock.inner.lock().await;
+    s.build_lock.set_current(Some(t.name.clone()));
+
     build_and_cache(
         &t.repo, &t.remote, &t.branch,
         &t.build_cmd, t.artifact.as_deref(),
@@ -329,6 +342,9 @@ async fn target_deploy(
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    s.build_lock.set_current(None);
+    drop(_guard);
 
     let _ = s.tx.send(WsEvent {
         event: "deploy_complete".into(),
@@ -508,11 +524,26 @@ pub fn try_rollback_with_cache(
     }
 }
 
+// ── Queue status ──
+
+#[derive(Serialize)]
+struct QueueResponse {
+    building: Option<String>,
+}
+
+async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
+    let st = s.build_lock.status();
+    Json(QueueResponse {
+        building: st.current,
+    })
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/queue", get(queue_status))
         .route("/api/targets", get(list_targets))
         .route("/api/targets/{name}/status", get(target_status))
         .route("/api/targets/{name}/commits", get(target_commits))
