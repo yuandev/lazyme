@@ -26,6 +26,7 @@ pub struct AppState {
     pub tx: broadcast::Sender<WsEvent>,
     pub build_lock: Arc<BuildLock>,
     pub self_update_repo: PathBuf,
+    pub self_update_remote: String,
 }
 
 /// Per-target configuration and state.
@@ -630,6 +631,7 @@ async fn self_update_handler(
     State(s): State<SharedState>,
 ) -> Json<serde_json::Value> {
     let repo = s.self_update_repo.clone();
+    let remote_name = s.self_update_remote.clone();
     let tx = s.tx.clone();
 
     let _ = tx.send(WsEvent {
@@ -640,7 +642,7 @@ async fn self_update_handler(
     });
 
     // Check first — return immediately with status
-    match crate::self_update::check(&repo, "main") {
+    match crate::self_update::check(&repo, &remote_name, "main") {
         Ok(Some(remote)) => {
             let return_commit = remote.clone();
             let tx2 = tx.clone();
@@ -652,7 +654,7 @@ async fn self_update_handler(
                     message: None,
                 });
 
-                match crate::self_update::update(&repo, "main") {
+                match crate::self_update::update(&repo, &remote_name, "main") {
                     Ok(new_hash) => {
                         let _ = tx2.send(WsEvent {
                             event: "self_update_complete".into(),
