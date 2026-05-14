@@ -19,6 +19,7 @@ use rust_embed::RustEmbed;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 use tracing::{error, info, warn};
 use tokio::sync::broadcast;
@@ -117,13 +118,22 @@ async fn main() -> anyhow::Result<()> {
 
     // Try ports starting from the configured port, auto-increment if in use
     let mut port = args.port;
+    let mut retries = 0u32;
     let listener = loop {
         let addr = format!("0.0.0.0:{port}");
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => break l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                warn!("Port {port} in use, trying {}...", port + 1);
-                port += 1;
+                // Retry the original port 3 times (1s delay) before incrementing
+                // This handles restart where the old process is still releasing the port
+                if port == args.port && retries < 3 {
+                    warn!("Port {port} in use, retrying in 1s (attempt {}/3)...", retries + 1);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    retries += 1;
+                } else {
+                    warn!("Port {port} in use, trying {}...", port + 1);
+                    port += 1;
+                }
             }
             Err(e) => return Err(e.into()),
         }

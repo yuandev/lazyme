@@ -100,9 +100,14 @@ pub fn restart() -> ! {
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        cmd.stdin(std::process::Stdio::null());
     }
+    tracing::info!("Spawning new process: {} {:?}", exe.display(), args);
     match cmd.spawn() {
-        Ok(_) => std::process::exit(0),
+        Ok(child) => {
+            tracing::info!("New process spawned (pid={}), exiting", child.id());
+            std::process::exit(0);
+        }
         Err(e) => {
             tracing::error!("Failed to spawn new process: {e}");
             std::process::exit(1);
