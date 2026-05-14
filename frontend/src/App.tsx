@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
-  fetchTarget as fetchTargetApi, fetchQueue,
+  fetchTarget as fetchTargetApi, cloneTarget, fetchQueue,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
@@ -53,6 +53,8 @@ function App() {
           if (data.event !== 'self_update_error' && data.event !== 'self_update_complete') {
             refreshTargets();
           }
+        } else if (data.event === 'targets_changed') {
+          refreshTargets();
         } else {
           refreshTargets();
         }
@@ -154,6 +156,7 @@ function TargetDetail({ name }: { name: string }) {
   const [branchSel, setBranchSel] = useState('');
   const [switchingBranch, setSwitchingBranch] = useState(false);
   const [fetching, setFetching] = useState(false);
+  const [cloning, setCloning] = useState(false);
 
   const refresh = useCallback(async () => {
     const [s, c, h] = await Promise.all([
@@ -215,6 +218,18 @@ function TargetDetail({ name }: { name: string }) {
     setFetching(false);
   };
 
+  const handleClone = async () => {
+    const newName = prompt('New target name:', `${name}-clone`);
+    if (!newName) return;
+    setCloning(true);
+    try {
+      await cloneTarget(name, newName);
+    } catch (e: any) {
+      alert(`Clone failed: ${e.message || e}`);
+    }
+    setCloning(false);
+  };
+
   if (!status) return <div style={s.empty}>Loading...</div>;
 
   return (
@@ -270,6 +285,9 @@ function TargetDetail({ name }: { name: string }) {
             <div style={{ flex: 1 }} />
             <button onClick={handleFetch} disabled={fetching} style={s.btnFetch}>
               {fetching ? '...' : 'fetch'}
+            </button>
+            <button onClick={handleClone} disabled={cloning} style={s.btnClone}>
+              clone
             </button>
           </div>
           <div style={s.card}>
@@ -393,6 +411,7 @@ const s: Record<string, React.CSSProperties> = {
   branchSelect: { padding: '0.3rem 0.5rem', border: '1px solid #334155', borderRadius: 4, background: '#0f172a', color: '#e2e8f0', fontSize: '0.8rem', fontFamily: 'monospace', maxWidth: 180 },
   btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc', flexShrink: 0 },
   btnFetch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#166534', color: '#4ade80', flexShrink: 0 },
+  btnClone: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#581c87', color: '#c084fc', flexShrink: 0 },
 };
 
 export default App;

@@ -14,14 +14,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 use tokio::sync::broadcast;
 
 pub type SharedState = Arc<AppState>;
 
 pub struct AppState {
-    pub targets: HashMap<String, Arc<TargetState>>,
+    pub targets: RwLock<HashMap<String, Arc<TargetState>>>,
     pub interval: u64,
     pub tx: broadcast::Sender<WsEvent>,
     pub build_lock: Arc<BuildLock>,
@@ -158,8 +158,8 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
 
 /// GET /api/targets
 async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> {
-    let mut summaries: Vec<TargetSummary> = s
-        .targets
+    let targets = s.targets.read().unwrap();
+    let mut summaries: Vec<TargetSummary> = targets
         .iter()
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
@@ -185,7 +185,7 @@ async fn target_status(
     State(s): State<SharedState>,
     Path(name): Path<String>,
 ) -> Result<Json<StatusResponse>, StatusCode> {
-    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     let deployed = { t.state.lock().unwrap().current().clone() };
     let running = { t.process.lock().unwrap().is_some() };
     Ok(Json(StatusResponse {
@@ -206,7 +206,7 @@ async fn target_commits(
     State(s): State<SharedState>,
     Path(name): Path<String>,
 ) -> Result<Json<CommitsResponse>, StatusCode> {
-    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     git::recent_commits(&t.repo, 20)
         .map(|commits| Json(CommitsResponse { commits }))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
@@ -217,7 +217,7 @@ async fn target_history(
     State(s): State<SharedState>,
     Path(name): Path<String>,
 ) -> Result<Json<HistoryResponse>, StatusCode> {
-    let t = s.targets.get(&name).ok_or(StatusCode::NOT_FOUND)?;
+    let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     let st = t.state.lock().unwrap();
     Ok(Json(HistoryResponse {
         history: st.history().to_vec(),
@@ -231,7 +231,9 @@ async fn target_logs(
 ) -> Result<Json<LogResponse>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
     let log_path = t
         .repo
@@ -260,7 +262,9 @@ async fn target_rollback(
 ) -> Result<Json<RollbackResponse>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     git::checkout(&t.repo, &body.commit)
@@ -322,7 +326,9 @@ async fn target_deploy(
 ) -> Result<Json<RollbackResponse>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let branch = t.branch();
@@ -549,7 +555,9 @@ async fn target_set_branch(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let output = std::process::Command::new("git")
@@ -594,7 +602,9 @@ async fn target_branches(
 ) -> Result<Json<BranchesResponse>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let output = std::process::Command::new("git")
@@ -624,7 +634,9 @@ async fn target_fetch(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let t = s
         .targets
+        .read().unwrap()
         .get(&name)
+        .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let branch = t.branch();
@@ -640,6 +652,141 @@ async fn target_fetch(
     })))
 }
 
+// ── Clone target ──
+
+#[derive(Deserialize)]
+struct CloneBody {
+    new_name: String,
+}
+
+fn increment_port(s: &str) -> String {
+    // Find the last port-like number (1024-65534) and increment it
+    let bytes = s.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 {
+        i -= 1;
+        if bytes[i].is_ascii_digit() {
+            let end = i + 1;
+            while i > 0 && bytes[i - 1].is_ascii_digit() {
+                i -= 1;
+            }
+            if let Ok(port) = s[i..end].parse::<u16>() {
+                if port >= 1024 && port < 65535 {
+                    let mut result = s[..i].to_string();
+                    result.push_str(&(port + 1).to_string());
+                    result.push_str(&s[end..]);
+                    return result;
+                }
+            }
+            break; // only try the last number
+        }
+    }
+    s.to_string()
+}
+
+/// POST /api/targets/{name}/clone
+async fn target_clone(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<CloneBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let new_name = body.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "new_name is required".into()));
+    }
+
+    let source = s.targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "source target not found".into()))?;
+
+    if s.targets.read().unwrap().contains_key(&new_name) {
+        return Err((StatusCode::CONFLICT, format!("target '{new_name}' already exists")));
+    }
+
+    // Build cloned config with auto-incremented ports
+    let cloned_run_cmd = source.run_cmd.as_ref().map(|c| increment_port(c));
+    let cloned_health_url = source.health_url.as_ref().map(|u| increment_port(u));
+
+    // Write new profile config
+    let profile = Some(new_name.clone());
+    let mut table = toml::Table::new();
+    {
+        let mut build = toml::Table::new();
+        build.insert("command".into(), toml::Value::String(source.build_cmd.clone()));
+        if let Some(ref art) = source.artifact {
+            build.insert("artifact".into(), toml::Value::String(art.display().to_string()));
+        }
+        table.insert("build".into(), toml::Value::Table(build));
+    }
+    {
+        let mut run = toml::Table::new();
+        if let Some(ref cmd) = cloned_run_cmd {
+            run.insert("command".into(), toml::Value::String(cmd.clone()));
+        }
+        if let Some(ref url) = cloned_health_url {
+            run.insert("health_url".into(), toml::Value::String(url.clone()));
+        }
+        if source.health_timeout != 30 {
+            run.insert("health_timeout".into(), toml::Value::Integer(source.health_timeout as i64));
+        }
+        table.insert("run".into(), toml::Value::Table(run));
+    }
+    {
+        let mut watch = toml::Table::new();
+        watch.insert("branch".into(), toml::Value::String(source.branch()));
+        table.insert("watch".into(), toml::Value::Table(watch));
+    }
+
+    let config_path = source.repo.join(".deployd").join(format!("config.{new_name}.toml"));
+    std::fs::create_dir_all(config_path.parent().unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Append to registry
+    let entry = crate::registry::TargetEntry {
+        name: new_name.clone(),
+        repo: source.repo.clone(),
+        profile,
+    };
+    crate::registry::append_entry(&entry)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Create new TargetState and insert
+    let ts = Arc::new(TargetState {
+        name: new_name.clone(),
+        repo: source.repo.clone(),
+        remote: source.remote.clone(),
+        branch: Mutex::new(source.branch()),
+        build_cmd: source.build_cmd.clone(),
+        artifact: source.artifact.clone(),
+        run_cmd: cloned_run_cmd,
+        health_url: cloned_health_url,
+        health_timeout: source.health_timeout,
+        process: Mutex::new(None),
+        state: Mutex::new(crate::state::StateManager::new(&source.repo)),
+        profile: Some(new_name.clone()),
+    });
+
+    s.targets.write().unwrap().insert(new_name.clone(), ts.clone());
+
+    // Spawn poll loop for the new target
+    let interval = s.interval;
+    let tx = s.tx.clone();
+    let lock = s.build_lock.clone();
+    tokio::spawn(async move { crate::poll_loop(ts, interval, tx, lock).await });
+
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: new_name.clone(),
+        commit: None,
+        message: None,
+    });
+
+    Ok(Json(serde_json::json!({"status": "ok", "name": new_name})))
+}
+
 // ── Config reload ──
 
 /// POST /api/reload — reload project configs and registry
@@ -653,7 +800,7 @@ async fn reload_config(
     if let Ok(registry) = crate::registry::load() {
         let targets = crate::registry::filter(registry, &[]);
         for entry in &targets {
-            if let Some(t) = s.targets.get(&entry.name) {
+            if let Some(t) = s.targets.read().unwrap().get(&entry.name) {
                 // Reload project config for existing target
                 if let Ok(Some(proj)) =
                     crate::project::ProjectConfig::load(&entry.repo, entry.profile.as_deref())
@@ -770,6 +917,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/branch", post(target_set_branch))
         .route("/api/targets/{name}/branches", get(target_branches))
         .route("/api/targets/{name}/fetch", post(target_fetch))
+        .route("/api/targets/{name}/clone", post(target_clone))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
         .with_state(state)

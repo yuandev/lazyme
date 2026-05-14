@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
     let build_lock = Arc::new(queue::BuildLock::new());
 
     let shared = Arc::new(AppState {
-        targets: target_map,
+        targets: std::sync::RwLock::new(target_map),
         interval: args.interval,
         tx,
         build_lock: build_lock.clone(),
@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Start one poller per target
-    for target in shared.targets.values() {
+    for target in shared.targets.read().unwrap().values() {
         let t = target.clone();
         let interval = args.interval;
         let tx = shared.tx.clone();
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn poll_loop(
+pub async fn poll_loop(
     target: Arc<TargetState>,
     interval_secs: u64,
     tx: broadcast::Sender<api::WsEvent>,

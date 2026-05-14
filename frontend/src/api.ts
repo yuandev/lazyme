@@ -121,6 +121,15 @@ export async function fetchTarget(name: string): Promise<{ status: string; remot
   return res.json();
 }
 
+export async function cloneTarget(name: string, newName: string): Promise<{ status: string; name: string }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/clone`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name: newName }),
+  });
+  return res.json();
+}
+
 export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();
