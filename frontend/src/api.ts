@@ -135,6 +135,10 @@ export async function fetchVersion(): Promise<{ version: string }> {
   return res.json();
 }
 
+export function restartServer(): void {
+  fetch(`${API}/restart`, { method: 'POST' });
+}
+
 export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();

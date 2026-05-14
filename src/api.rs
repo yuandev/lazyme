@@ -934,8 +934,7 @@ async fn self_update_handler(
                             commit: Some(new_version),
                             message: None,
                         });
-                        tracing::info!("Self-update complete, restarting...");
-                        crate::self_update::restart();
+                        tracing::info!("Self-update download complete, ready for restart.");
                     }
                     Err(e) => {
                         let _ = tx2.send(WsEvent {
@@ -1094,6 +1093,14 @@ async fn target_get_local_repo(
     })))
 }
 
+// ── Restart ──
+
+/// POST /api/restart
+async fn restart_handler() -> Json<serde_json::Value> {
+    tracing::info!("Restart requested via API");
+    crate::self_update::restart();
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
@@ -1116,6 +1123,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
+        .route("/api/restart", post(restart_handler))
         .route("/api/version", get(version_handler))
         .with_state(state)
 }

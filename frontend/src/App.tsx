@@ -4,6 +4,7 @@ import {
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
   fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
+  restartServer,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
@@ -108,6 +109,10 @@ function App() {
             <div style={{ ...s.progressBar, width: `${update.progress}%` }} />
             <span style={s.updateBtnText}>{update.progress}%</span>
           </div>
+        ) : update.phase === 'complete' ? (
+          <button onClick={restartServer} style={{ ...s.headerBtn, ...s.updateOk }}>
+            restart now
+          </button>
         ) : (
           <button
             onClick={triggerSelfUpdate}
@@ -116,11 +121,9 @@ function App() {
               ...s.headerBtn,
               ...(update.phase === 'error' ? s.updateError : {}),
               ...(update.error === 'Already up to date' ? s.updateOk : {}),
-              ...(update.phase === 'complete' ? s.updateOk : {}),
             }}
           >
             {update.phase === 'checking' ? 'checking...' :
-             update.phase === 'complete' ? 'restarting...' :
              update.phase === 'error' ? 'error' :
              update.version ? `update to v${update.version}` :
              update.error ? 'up to date' : 'update'}
