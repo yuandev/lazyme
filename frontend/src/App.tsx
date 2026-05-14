@@ -5,7 +5,7 @@ import {
   fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
   fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
-  restartServer,
+  restartServer, autoDeployToggle,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 import { I18nProvider, useI18n, tf } from './i18n';
@@ -27,6 +27,9 @@ function AppInner() {
   const [building, setBuilding] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string>('...');
   const [update, setUpdate] = useState<UpdateState>({ phase: null, version: null, progress: 0, error: null });
+  const [liveLog, setLiveLog] = useState<{ target: string; commit: string } | null>(null);
+  const [liveLines, setLiveLines] = useState<string[]>([]);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   const refreshTargets = useCallback(async () => {
@@ -67,7 +70,26 @@ function AppInner() {
           case 'self_update_error':
             setUpdate(prev => ({ ...prev, phase: 'error', error: data.message }));
             break;
+          case 'build_log_start':
+            setLiveLog({ target: data.target, commit: data.commit });
+            setLiveLines([]);
+            break;
+          case 'build_output':
+            setLiveLines(prev => [...prev, data.message || '']);
+            break;
+          case 'build_log_end':
+            setLiveLog(null);
+            refreshTargets();
+            break;
+          case 'build_started':
+            setLiveLog({ target: data.target, commit: data.commit || '' });
+            setLiveLines([]);
+            break;
+          case 'build_complete':
+            refreshTargets();
+            break;
           case 'targets_changed':
+          case 'auto_deploy_toggled':
             refreshTargets();
             break;
           default:
@@ -80,6 +102,10 @@ function AppInner() {
     ws.onclose = () => { wsRef.current = null; };
     return () => { ws.close(); };
   }, [refreshTargets]);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [liveLines]);
 
   const triggerSelfUpdate = async () => {
     setUpdate({ phase: 'checking', version: null, progress: 0, error: null });
@@ -135,23 +161,52 @@ function AppInner() {
       </header>
       <div style={s.body}>
         <aside style={s.sidebar}>
-          {targets.map((target) => (
-            <button
-              key={target.name}
-              onClick={() => setSelected(target.name)}
-              style={{ ...s.targetCard, ...(selected === target.name ? s.targetCardActive : {}) }}
-            >
-              <div style={s.cardName}>
-                {target.process_running && <span style={s.dot} />}
-                {target.name}
+          {(() => {
+            const groups = new Map<string | null, TargetSummary[]>();
+            for (const target of targets) {
+              const g = target.group || null;
+              if (!groups.has(g)) groups.set(g, []);
+              groups.get(g)!.push(target);
+            }
+            const sorted = [...groups.entries()].sort(([a], [b]) => (a || '~').localeCompare(b || '~'));
+            return sorted.map(([group, items]) => (
+              <div key={group || '__ungrouped__'} style={{ marginBottom: '0.75rem' }}>
+                <div style={s.groupHeader}>{group || t.dash}</div>
+                {items.map((target) => (
+                  <button
+                    key={target.name}
+                    onClick={() => setSelected(target.name)}
+                    style={{ ...s.targetCard, ...(selected === target.name ? s.targetCardActive : {}) }}
+                  >
+                    <div style={s.cardName}>
+                      {target.process_running && <span style={s.dot} />}
+                      {target.name}
+                      <span style={s.serviceBadge}>{target.service_type}</span>
+                    </div>
+                    <div style={s.cardMeta}>
+                      {target.branch} &middot; {target.deployed?.short_hash ?? t.never}
+                    </div>
+                  </button>
+                ))}
               </div>
-              <div style={s.cardMeta}>
-                {target.branch} &middot; {target.deployed?.short_hash ?? t.never}
-              </div>
-            </button>
-          ))}
+            ));
+          })()}
         </aside>
         <main style={s.main}>
+          {liveLog && (
+            <div style={s.card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
+                <span style={{ fontSize: '0.9rem', fontWeight: 600, color: '#38bdf8' }}>{liveLog.target}</span>
+                <code style={{ fontSize: '0.75rem', color: '#64748b' }}>{liveLog.commit}</code>
+                <div style={{ flex: 1 }} />
+                <button onClick={() => setLiveLog(null)} style={{ ...s.btnLog, fontSize: '0.7rem' }}>x</button>
+              </div>
+              <pre style={s.liveLog}>
+                {liveLines.join('\n')}
+                <div ref={logEndRef} />
+              </pre>
+            </div>
+          )}
           {selected ? (
             <TargetDetail name={selected} />
           ) : (
@@ -306,6 +361,21 @@ function TargetDetail({ name }: { name: string }) {
             <button onClick={handleDeploy} disabled={loading} style={s.btnPrimary}>
               {loading ? t.deploying : t.deployLatest}
             </button>
+            <button
+              onClick={async () => { await autoDeployToggle(name); await refresh(); }}
+              style={{
+                ...s.btnPrimary,
+                background: status.auto_deploy_paused ? '#166534' : '#713f12',
+                color: status.auto_deploy_paused ? '#4ade80' : '#facc15',
+              }}
+            >
+              {status.auto_deploy_paused ? t.resume : t.pause}
+            </button>
+            {status.auto_deploy_paused && (
+              <span style={{ fontSize: '0.8rem', color: '#f59e0b', marginLeft: '0.5rem' }}>
+                {t.autoDeployPaused}
+              </span>
+            )}
           </div>
           <div style={{ ...s.card, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <span style={{ fontSize: '0.75rem', color: '#94a3b8', flexShrink: 0 }}>{t.branch}</span>
@@ -344,6 +414,9 @@ function TargetDetail({ name }: { name: string }) {
               <Item label={t.branchLabel} value={status.branch} />
               <Item label={t.interval} value={`${status.interval_secs}${t.seconds}`} />
               <Item label={t.mode} value={status.run_mode} />
+              <Item label={t.pid} value={status.pid?.toString() ?? t.dash} />
+              <Item label={t.uptime} value={status.uptime_secs != null ? `${status.uptime_secs}${t.seconds}` : t.dash} />
+              <Item label={t.healthCheck} value={status.health_status ? `${status.health_status.ok ? t.ok : t.fail}` : t.dash} />
               <Item label={t.build} value={status.build_cmd} />
               <Item label={t.run} value={status.run_cmd ?? t.dash} />
               <Item label={t.jvmArgs} value={status.jvm_args ?? t.dash} />
@@ -367,7 +440,7 @@ function TargetDetail({ name }: { name: string }) {
                   disabled={isDeployed || loading}
                   style={{ ...s.btnRollback, ...(isDeployed ? s.btnDisabled : {}) }}
                 >
-                  {isDeployed ? t.current : t.rollback}
+                  {isDeployed ? t.current : t.deploy}
                 </button>
               </div>
             );
@@ -387,6 +460,9 @@ function TargetDetail({ name }: { name: string }) {
                 {h.cache_path && <span style={s.badgeCache}>{t.cached}</span>}
                 {h.log_path && (
                   <button onClick={() => viewLog(h.short_hash)} style={s.btnLog}>{t.log}</button>
+                )}
+                {h.build_duration_secs != null && (
+                  <span style={s.badgeCache}>{h.build_duration_secs}s</span>
                 )}
                 <span style={h.success ? s.badgeGreen : s.badgeYellow}>
                   {h.success ? t.ok : t.fail}
@@ -615,6 +691,8 @@ const s: Record<string, React.CSSProperties> = {
   cardName: { fontWeight: 600, fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.4rem' },
   cardMeta: { fontSize: '0.75rem', color: '#64748b', marginTop: '0.2rem' },
   dot: { width: 7, height: 7, borderRadius: '50%', background: '#4ade80', display: 'inline-block', flexShrink: 0 },
+  groupHeader: { fontSize: '0.65rem', color: '#475569', textTransform: 'uppercase', letterSpacing: '0.05em', padding: '0.5rem 1rem 0.25rem', fontWeight: 600 },
+  serviceBadge: { fontSize: '0.6rem', padding: '0.1rem 0.35rem', borderRadius: 3, background: '#334155', color: '#94a3b8', marginLeft: '0.4rem', fontFamily: 'monospace', fontWeight: 400 },
   detailHeader: { display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap', marginBottom: '1rem' },
   detailName: { fontSize: '1.2rem', margin: 0, color: '#e2e8f0' },
   detailRepo: { fontSize: '0.75rem', color: '#64748b', fontFamily: 'monospace' },
@@ -641,6 +719,7 @@ const s: Record<string, React.CSSProperties> = {
   badgeCache: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#1e3a5f', color: '#7dd3fc' },
   empty: { color: '#64748b', padding: '2rem', textAlign: 'center' },
   log: { background: '#0f172a', padding: '1rem', borderRadius: 6, fontSize: '0.75rem', fontFamily: 'monospace', color: '#94a3b8', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto' },
+  liveLog: { background: '#0f172a', padding: '0.75rem', borderRadius: 6, fontSize: '0.7rem', fontFamily: 'monospace', color: '#94a3b8', whiteSpace: 'pre-wrap', maxHeight: 250, overflow: 'auto', margin: 0 },
   branchSelect: { padding: '0.3rem 0.5rem', border: '1px solid #334155', borderRadius: 4, background: '#0f172a', color: '#e2e8f0', fontSize: '0.8rem', fontFamily: 'monospace', maxWidth: 180 },
   btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc', flexShrink: 0 },
   btnFetch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#166534', color: '#4ade80', flexShrink: 0 },

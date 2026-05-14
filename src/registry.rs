@@ -8,6 +8,8 @@ pub struct TargetEntry {
     pub repo: PathBuf,
     #[serde(default)]
     pub profile: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,11 +45,17 @@ pub fn append_entry(entry: &TargetEntry) -> Result<()> {
         String::new()
     };
 
+    let group_line = if let Some(ref g) = entry.group {
+        format!("group = \"{}\"\n", g)
+    } else {
+        String::new()
+    };
     let new_entry = format!(
-        "\n[[targets]]\nname = \"{}\"\nrepo = \"{}\"\nprofile = \"{}\"\n",
+        "\n[[targets]]\nname = \"{}\"\nrepo = \"{}\"\nprofile = \"{}\"\n{}",
         entry.name,
         entry.repo.display(),
-        entry.profile.as_deref().unwrap_or("")
+        entry.profile.as_deref().unwrap_or(""),
+        group_line,
     );
 
     content.push_str(&new_entry);

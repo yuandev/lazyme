@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, Command};
+use std::time::Instant;
 
 pub struct ManagedProcess {
     child: Option<Child>,
+    started_at: Option<Instant>,
 }
 
 impl ManagedProcess {
@@ -18,11 +20,15 @@ impl ManagedProcess {
             }
         }
         let child = c.spawn()?;
-        Ok(Self { child: Some(child) })
+        Ok(Self { child: Some(child), started_at: Some(Instant::now()) })
     }
 
     pub fn pid(&self) -> Option<u32> {
         self.child.as_ref().map(|c| c.id())
+    }
+
+    pub fn uptime_secs(&self) -> Option<u64> {
+        self.started_at.map(|t| t.elapsed().as_secs())
     }
 
     pub fn kill(&mut self) {

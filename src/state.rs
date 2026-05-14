@@ -11,6 +11,8 @@ pub struct DeployRecord {
     pub cache_path: Option<PathBuf>,
     pub log_path: Option<PathBuf>,
     pub success: bool,
+    #[serde(default)]
+    pub build_duration_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,6 +91,7 @@ impl StateManager {
         cache_path: Option<PathBuf>,
         log_path: Option<PathBuf>,
         success: bool,
+        build_duration_secs: Option<u64>,
     ) -> Result<()> {
         let record = DeployRecord {
             commit_hash,
@@ -97,6 +100,7 @@ impl StateManager {
             cache_path,
             log_path,
             success,
+            build_duration_secs,
         };
 
         if self.state.current.is_some() {

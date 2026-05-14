@@ -5,6 +5,12 @@ export interface DeployRecord {
   cache_path: string | null;
   log_path: string | null;
   success: boolean;
+  build_duration_secs: number | null;
+}
+
+export interface HealthStatus {
+  ok: boolean;
+  last_check: string;
 }
 
 export interface TargetSummary {
@@ -16,6 +22,8 @@ export interface TargetSummary {
   remote_commit: string | null;
   process_running: boolean;
   health_url: string | null;
+  group: string | null;
+  service_type: string;
 }
 
 export interface TargetListResponse {
@@ -37,6 +45,12 @@ export interface StatusResponse {
   run_mode: string;
   jvm_args: string | null;
   envs: Record<string, string>;
+  auto_deploy_paused: boolean;
+  group: string | null;
+  service_type: string;
+  pid: number | null;
+  uptime_secs: number | null;
+  health_status: HealthStatus | null;
 }
 
 export interface CommitInfo {
@@ -224,6 +238,11 @@ export interface EnvResponse {
 
 export async function fetchEnv(name: string): Promise<EnvResponse> {
   const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/env`);
+  return res.json();
+}
+
+export async function autoDeployToggle(name: string): Promise<{ status: string; auto_deploy_paused: boolean }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/auto-deploy`, { method: 'POST' });
   return res.json();
 }
 

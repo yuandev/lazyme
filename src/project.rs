@@ -42,6 +42,9 @@ pub struct RunSection {
     pub health_timeout: u64,
     /// JVM arguments
     pub jvm_args: Option<String>,
+    /// Auto-restart process if it crashes (dev mode only restarts, no rebuild)
+    #[serde(default)]
+    pub auto_restart: Option<bool>,
 }
 
 fn default_health_timeout() -> u64 {

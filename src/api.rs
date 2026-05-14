@@ -45,6 +45,25 @@ pub struct TargetState {
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
     pub profile: Option<String>,
+    pub group: Option<String>,
+    pub auto_deploy_paused: Mutex<bool>,
+    pub health_status: Mutex<Option<HealthStatus>>,
+    pub auto_restart: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HealthStatus {
+    pub ok: bool,
+    pub last_check: String,
+}
+
+fn detect_service_type(run_cmd: Option<&str>) -> String {
+    let cmd = run_cmd.unwrap_or("").to_lowercase();
+    if cmd.contains("java") || cmd.contains("mvn") || cmd.contains("gradle") {"Java".into()}
+    else if cmd.contains("node") || cmd.contains("npm") || cmd.contains("yarn") || cmd.contains("pnpm") {"Node".into()}
+    else if cmd.contains("python") || cmd.contains("uvicorn") || cmd.contains("gunicorn") {"Python".into()}
+    else if cmd.contains("go") || cmd.contains("cargo") {"Go/Rust".into()}
+    else {"?".into()}
 }
 
 impl TargetState {
@@ -75,6 +94,8 @@ struct TargetSummary {
     remote_commit: Option<String>,
     process_running: bool,
     health_url: Option<String>,
+    group: Option<String>,
+    service_type: String,
 }
 
 #[derive(Serialize)]
@@ -98,6 +119,12 @@ struct StatusResponse {
     run_mode: String,
     jvm_args: Option<String>,
     envs: HashMap<String, String>,
+    auto_deploy_paused: bool,
+    group: Option<String>,
+    service_type: String,
+    pid: Option<u32>,
+    uptime_secs: Option<u64>,
+    health_status: Option<HealthStatus>,
 }
 
 #[derive(Serialize)]
@@ -181,6 +208,8 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
                 remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch()).ok(),
                 process_running: running,
                 health_url: t.health_url.clone(),
+                group: t.group.clone(),
+                service_type: detect_service_type(t.run_cmd.as_deref()),
             }
         })
         .collect();
@@ -195,9 +224,20 @@ async fn target_status(
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     let deployed = { t.state.lock().unwrap().current().clone() };
-    let running = { t.process.lock().unwrap().is_some() };
+    let (running, pid, uptime) = {
+        let mut proc = t.process.lock().unwrap();
+        if let Some(ref mut p) = *proc {
+            let alive = p.is_running();
+            if alive { (true, p.pid(), p.uptime_secs()) }
+            else { (false, None, None) }
+        } else {
+            (false, None, None)
+        }
+    };
+    let health_status = t.health_status.lock().unwrap().clone();
     let jvm_args = t.jvm_args.lock().unwrap().clone();
     let envs = t.envs.lock().unwrap().clone();
+    let auto_deploy_paused = *t.auto_deploy_paused.lock().unwrap();
     Ok(Json(StatusResponse {
         name: t.name.clone(),
         repo: t.repo.display().to_string(),
@@ -213,6 +253,12 @@ async fn target_status(
         run_mode: t.run_mode.clone(),
         jvm_args,
         envs,
+        auto_deploy_paused,
+        group: t.group.clone(),
+        service_type: detect_service_type(t.run_cmd.as_deref()),
+        pid,
+        uptime_secs: uptime,
+        health_status,
     }))
 }
 
@@ -321,6 +367,7 @@ async fn target_rollback(
             Some(&envs),
             &t.run_mode,
             Some(&s.tx), &t.name,
+            Some(&t.health_status),
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -328,6 +375,9 @@ async fn target_rollback(
 
     s.build_lock.set_current(None);
     drop(_guard);
+
+    // Pause auto-deploy when manually rolling back to a specific commit
+    *t.auto_deploy_paused.lock().unwrap() = true;
 
     let _ = s.tx.send(WsEvent {
         event: "rollback_complete".into(),
@@ -384,12 +434,16 @@ async fn target_deploy(
         Some(&envs),
         &t.run_mode,
         Some(&s.tx), &t.name,
+        Some(&t.health_status),
     )
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     s.build_lock.set_current(None);
     drop(_guard);
+
+    // Resume auto-deploy when deploying latest
+    *t.auto_deploy_paused.lock().unwrap() = false;
 
     let _ = s.tx.send(WsEvent {
         event: "deploy_complete".into(),
@@ -423,6 +477,7 @@ pub async fn build_and_cache(
     run_mode: &str,
     tx: Option<&broadcast::Sender<WsEvent>>,
     target_name: &str,
+    health_status: Option<&Mutex<Option<HealthStatus>>>,
 ) -> anyhow::Result<()> {
     use std::process::Command;
 
@@ -447,6 +502,7 @@ pub async fn build_and_cache(
     }
 
     // Build step — skipped in dev mode
+    let build_start = std::time::Instant::now();
     let (success, log_path, cache_path) = if is_dev {
         (true, None, None)
     } else {
@@ -463,18 +519,77 @@ pub async fn build_and_cache(
             })
             .unwrap_or_else(|| build_cmd.to_string());
 
-        let output = Command::new(shell)
+        // Send build log start event
+        if let Some(tx) = tx {
+            let _ = tx.send(WsEvent {
+                event: "build_log_start".into(),
+                target: target_name.into(),
+                commit: Some(short.clone()),
+                message: None,
+            });
+        }
+
+        use std::io::{BufRead, BufReader};
+        let mut child = Command::new(shell)
             .args([flag, &resolved_build])
             .current_dir(repo)
-            .output()?;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
 
-        let success = output.status.success();
+        // Read stdout line by line, broadcast and buffer
+        let stdout = child.stdout.take().unwrap();
+        let reader = BufReader::new(stdout);
+        let mut log_buf = String::new();
+        for line_res in reader.lines() {
+            let line = line_res.unwrap_or_default();
+            if let Some(tx) = tx {
+                let _ = tx.send(WsEvent {
+                    event: "build_output".into(),
+                    target: target_name.into(),
+                    commit: Some(short.clone()),
+                    message: Some(line.clone()),
+                });
+            }
+            log_buf.push_str(&line);
+            log_buf.push('\n');
+        }
+        // Also read stderr
+        if let Some(stderr) = child.stderr.take() {
+            let err_reader = BufReader::new(stderr);
+            for line_res in err_reader.lines() {
+                let line = line_res.unwrap_or_default();
+                if let Some(tx) = tx {
+                    let _ = tx.send(WsEvent {
+                        event: "build_output".into(),
+                        target: target_name.into(),
+                        commit: Some(short.clone()),
+                        message: Some(line.clone()),
+                    });
+                }
+                log_buf.push_str(&line);
+                log_buf.push('\n');
+            }
+        }
+
+        let status = child.wait()?;
+        let success = status.success();
+
+        // Send build log end event
+        if let Some(tx) = tx {
+            let _ = tx.send(WsEvent {
+                event: "build_log_end".into(),
+                target: target_name.into(),
+                commit: Some(short.clone()),
+                message: Some(format!("success={success}")),
+            });
+        }
 
         // Persist build log
         let log_dir = repo.join(".deployd").join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join(format!("{short}.log"));
-        let _ = std::fs::write(&log_path, &output.stdout);
+        let _ = std::fs::write(&log_path, &log_buf);
         let log_path = if log_path.exists() { Some(log_path) } else { None };
 
         let cache_path = if success {
@@ -525,21 +640,32 @@ pub async fn build_and_cache(
     }
 
     // Health check
-    if success && run_cmd.is_some() {
+    let hc_ok = if success && run_cmd.is_some() {
         if let Some(url) = health_url {
-            if !process::health_check(url, health_timeout).await {
+            let ok = process::health_check(url, health_timeout).await;
+            if !ok {
                 tracing::warn!("Health check failed for {url}");
             }
-        }
+            ok
+        } else { true }
+    } else { false };
+
+    if let Some(hs) = health_status {
+        *hs.lock().unwrap() = Some(HealthStatus {
+            ok: hc_ok,
+            last_check: chrono::Utc::now().to_rfc3339(),
+        });
     }
 
     let mut st = state.lock().unwrap();
+    let duration = if is_dev { None } else { Some(build_start.elapsed().as_secs()) };
     st.record_deploy(
         commit_hash.to_string(),
         short,
         cache_path,
         log_path,
         success,
+        duration,
     )?;
 
     Ok(())
@@ -597,6 +723,7 @@ pub fn try_rollback_with_cache(
             Some(cache_path),
             None,
             true,
+            None,
         )?;
         Ok(true)
     } else {
@@ -737,6 +864,8 @@ async fn target_fetch(
 struct CloneBody {
     new_name: String,
     repo: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
 }
 
 fn increment_port(s: &str) -> String {
@@ -866,6 +995,7 @@ async fn target_clone(
         name: new_name.clone(),
         repo: repo.clone(),
         profile,
+        group: body.group.clone().or_else(|| source.group.clone()),
     };
     crate::registry::append_entry(&entry)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -887,6 +1017,10 @@ async fn target_clone(
         process: Mutex::new(None),
         state: Mutex::new(crate::state::StateManager::new(&repo)),
         profile: Some(new_name.clone()),
+        group: body.group.clone().or_else(|| source.group.clone()),
+        auto_deploy_paused: Mutex::new(false),
+        health_status: Mutex::new(None),
+        auto_restart: source.auto_restart,
     });
 
     s.targets.write().unwrap().insert(new_name.clone(), ts.clone());
@@ -942,6 +1076,39 @@ async fn reload_config(
         "new_targets": new_names,
         "hint": "restart to pick up new targets or build/run config changes"
     }))
+}
+
+// ── Auto-deploy toggle ──
+
+/// POST /api/targets/{name}/auto-deploy — toggle auto-deploy pause/resume
+async fn target_auto_deploy(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets
+        .read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let mut paused = t.auto_deploy_paused.lock().unwrap();
+    *paused = !*paused;
+    let is_paused = *paused;
+    drop(paused);
+
+    let _ = s.tx.send(WsEvent {
+        event: "auto_deploy_toggled".into(),
+        target: name.clone(),
+        commit: None,
+        message: Some(if is_paused { "paused".into() } else { "resumed".into() }),
+    });
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "target": name,
+        "auto_deploy_paused": is_paused,
+    })))
 }
 
 // ── Queue status ──
@@ -1358,6 +1525,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
         .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
         .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
+        .route("/api/targets/{name}/auto-deploy", post(target_auto_deploy))
         .route("/api/targets/{name}/env", get(target_get_env).put(target_put_env))
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))

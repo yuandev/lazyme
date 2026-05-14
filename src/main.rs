@@ -84,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
         let health_timeout = proj.run.health_timeout;
         let jvm_args = proj.run.jvm_args;
         let envs = proj.env.map(|e| e.vars).unwrap_or_default();
+        let auto_restart = proj.run.auto_restart.unwrap_or(false);
         let run_mode = proj.run.mode.unwrap_or_else(|| "deploy".into());
         let run_mode_display = run_mode.clone();
 
@@ -103,16 +104,21 @@ async fn main() -> anyhow::Result<()> {
             process: Mutex::new(None),
             state: Mutex::new(state::StateManager::new(&entry.repo)),
             profile: entry.profile.clone(),
+            group: entry.group.clone(),
+            auto_deploy_paused: Mutex::new(false),
+            health_status: Mutex::new(None),
+            auto_restart,
         });
 
         let branch_val = ts.branch();
         target_map.insert(entry.name.clone(), ts);
         info!(
-            "Target '{}' registered (repo={}, branch={}, mode={})",
+            "Target '{}' registered (repo={}, branch={}, mode={}, group={})",
             entry.name,
             entry.repo.display(),
             branch_val,
             run_mode_display,
+            entry.group.as_deref().unwrap_or("-"),
         );
     }
 
@@ -204,7 +210,42 @@ pub async fn poll_loop(
             st.current().as_ref().map(|r| r.commit_hash.clone())
         };
 
+        // Auto-restart crashed process (independent of new commits)
+        if target.auto_restart {
+            let is_running = target.process.lock().unwrap().as_mut().map_or(false, |p| p.is_running());
+            let has_deployed = deployed.is_some();
+            if has_deployed && !is_running {
+                warn!("[{}] process died, auto-restarting...", target.name);
+                let jvm_args = target.jvm_args.lock().unwrap().clone();
+                let envs = target.envs.lock().unwrap().clone();
+                if let Some(ref run_cmd) = target.run_cmd {
+                    let mut proc = target.process.lock().unwrap();
+                    let mut resolved = if let Some(ref art) = target.artifact {
+                        run_cmd.replace("{artifact}", &art.display().to_string())
+                    } else {
+                        run_cmd.to_string()
+                    };
+                    if let Some(ref ja) = jvm_args {
+                        resolved = resolved.replace("{jvm_args}", ja);
+                    }
+                    match process::ManagedProcess::spawn(&resolved, &target.repo, Some(&envs)) {
+                        Ok(p) => {
+                            *proc = Some(p);
+                            info!("[{}] auto-restarted", target.name);
+                        }
+                        Err(e) => error!("[{}] auto-restart failed: {e}", target.name),
+                    }
+                    drop(proc);
+                }
+            }
+        }
+
         if deployed.as_deref() == Some(&remote) {
+            continue;
+        }
+
+        // Skip if auto-deploy is paused
+        if *target.auto_deploy_paused.lock().unwrap() {
             continue;
         }
 
@@ -239,6 +280,7 @@ pub async fn poll_loop(
             &target.run_mode,
             Some(&tx),
             &target.name,
+            Some(&target.health_status),
         )
         .await
         {
