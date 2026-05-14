@@ -34,26 +34,40 @@ async fn main() -> anyhow::Result<()> {
 
     let args = config::Args::parse();
 
+    info!("lazyme v{} starting...", self_update::CURRENT_VERSION);
+    info!(
+        "config: port={}, interval={}s, remote={}, filter={}",
+        args.port,
+        args.interval,
+        args.remote,
+        if args.filter.is_empty() { "all".to_string() } else { args.filter.join(",") }
+    );
+
     // Self-update check (warn if newer version available)
     let parts: Vec<&str> = args.update_repo.split('/').collect();
     if parts.len() == 2 {
+        info!("Checking for updates from {}/{}...", parts[0], parts[1]);
         match self_update::check(parts[0], parts[1]).await {
             Ok(Some(version)) => {
                 warn!("lazyme update available: v{version}. POST /api/self-update to update.");
             }
+            Ok(None) => {
+                info!("lazyme is up to date");
+            }
             Err(e) => {
                 warn!("self-update check failed: {e}");
             }
-            _ => {}
         }
     }
 
     // Load target registry
+    info!("Loading target registry from ~/.config/lazyme/targets.toml");
     let targets = registry::load()?;
     let targets = registry::filter(targets, &args.filter);
     if targets.is_empty() {
         anyhow::bail!("No targets found. Check ~/.config/lazyme/targets.toml");
     }
+    info!("Loaded {} target(s)", targets.len());
 
     // Build per-target state
     let mut target_map = HashMap::new();
@@ -71,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         let jvm_args = proj.run.jvm_args;
         let envs = proj.env.map(|e| e.vars).unwrap_or_default();
         let run_mode = proj.run.mode.unwrap_or_else(|| "deploy".into());
+        let run_mode_display = run_mode.clone();
 
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
@@ -90,8 +105,15 @@ async fn main() -> anyhow::Result<()> {
             profile: entry.profile.clone(),
         });
 
+        let branch_val = ts.branch();
         target_map.insert(entry.name.clone(), ts);
-        info!("Target '{}' registered ({})", entry.name, entry.repo.display());
+        info!(
+            "Target '{}' registered (repo={}, branch={}, mode={})",
+            entry.name,
+            entry.repo.display(),
+            branch_val,
+            run_mode_display,
+        );
     }
 
     let (tx, _rx) = broadcast::channel::<api::WsEvent>(64);
@@ -106,12 +128,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Start one poller per target
+    let n = shared.targets.read().unwrap().len();
+    info!("Starting {} poll loop(s)...", n);
     for target in shared.targets.read().unwrap().values() {
         let t = target.clone();
         let interval = args.interval;
         let tx = shared.tx.clone();
         let lock = build_lock.clone();
-        tokio::spawn(async move { poll_loop(t, interval, tx, lock).await });
+        let name = t.name.clone();
+        tokio::spawn(async move {
+            info!("[{name}] poll loop started (interval={interval}s)");
+            poll_loop(t, interval, tx, lock).await;
+        });
     }
 
     let app = api::router(shared).fallback(serve_frontend);
@@ -138,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
             Err(e) => return Err(e.into()),
         }
     };
-    info!("Web UI at http://localhost:{port}");
+    info!("Web UI listening at http://localhost:{port}");
     axum::serve(listener, app).await?;
 
     Ok(())
