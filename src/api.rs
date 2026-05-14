@@ -39,8 +39,8 @@ pub struct TargetState {
     pub run_cmd: Option<String>,
     pub health_url: Option<String>,
     pub health_timeout: u64,
-    pub jvm_args: Option<String>,
-    pub envs: HashMap<String, String>,
+    pub jvm_args: Mutex<Option<String>>,
+    pub envs: Mutex<HashMap<String, String>>,
     pub run_mode: String,
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
@@ -196,6 +196,8 @@ async fn target_status(
     let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     let deployed = { t.state.lock().unwrap().current().clone() };
     let running = { t.process.lock().unwrap().is_some() };
+    let jvm_args = t.jvm_args.lock().unwrap().clone();
+    let envs = t.envs.lock().unwrap().clone();
     Ok(Json(StatusResponse {
         name: t.name.clone(),
         repo: t.repo.display().to_string(),
@@ -209,8 +211,8 @@ async fn target_status(
         build_cmd: t.build_cmd.clone(),
         run_cmd: t.run_cmd.clone(),
         run_mode: t.run_mode.clone(),
-        jvm_args: t.jvm_args.clone(),
-        envs: t.envs.clone(),
+        jvm_args,
+        envs,
     }))
 }
 
@@ -299,10 +301,13 @@ async fn target_rollback(
     let _guard = s.build_lock.inner.lock().await;
     s.build_lock.set_current(Some(t.name.clone()));
 
+    let jvm_args = t.jvm_args.lock().unwrap().clone();
+    let envs = t.envs.lock().unwrap().clone();
+
     let used_cache = try_rollback_with_cache(
         &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to,
-        t.jvm_args.as_deref(),
-        Some(&t.envs),
+        jvm_args.as_deref(),
+        Some(&envs),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -312,8 +317,8 @@ async fn target_rollback(
             &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to,
-            t.jvm_args.as_deref(),
-            Some(&t.envs),
+            jvm_args.as_deref(),
+            Some(&envs),
             &t.run_mode,
             Some(&s.tx), &t.name,
         )
@@ -367,13 +372,16 @@ async fn target_deploy(
     let _guard = s.build_lock.inner.lock().await;
     s.build_lock.set_current(Some(t.name.clone()));
 
+    let jvm_args = t.jvm_args.lock().unwrap().clone();
+    let envs = t.envs.lock().unwrap().clone();
+
     build_and_cache(
         &t.repo, &t.remote, &branch,
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
-        t.jvm_args.as_deref(),
-        Some(&t.envs),
+        jvm_args.as_deref(),
+        Some(&envs),
         &t.run_mode,
         Some(&s.tx), &t.name,
     )
@@ -802,7 +810,7 @@ async fn target_clone(
     // Build cloned config with auto-incremented ports
     let cloned_run_cmd = source.run_cmd.as_ref().map(|c| increment_port(c));
     let cloned_health_url = source.health_url.as_ref().map(|u| increment_port(u));
-    let cloned_jvm_args = source.jvm_args.as_ref().map(|j| increment_port(j));
+    let cloned_jvm_args = source.jvm_args.lock().unwrap().as_ref().map(|j| increment_port(j));
 
     // Write new profile config
     let profile = Some(new_name.clone());
@@ -829,13 +837,15 @@ async fn target_clone(
         if let Some(ref ja) = cloned_jvm_args {
             run.insert("jvm_args".into(), toml::Value::String(ja.clone()));
         }
-        if !source.envs.is_empty() {
+        let source_envs = source.envs.lock().unwrap();
+        if !source_envs.is_empty() {
             let mut env = toml::Table::new();
-            for (k, v) in &source.envs {
+            for (k, v) in source_envs.iter() {
                 env.insert(k.clone(), toml::Value::String(v.clone()));
             }
             table.insert("env".into(), toml::Value::Table(env));
         }
+        drop(source_envs);
         run.insert("mode".into(), toml::Value::String(source.run_mode.clone()));
         table.insert("run".into(), toml::Value::Table(run));
     }
@@ -871,8 +881,8 @@ async fn target_clone(
         run_cmd: cloned_run_cmd,
         health_url: cloned_health_url,
         health_timeout: source.health_timeout,
-        jvm_args: cloned_jvm_args,
-        envs: source.envs.clone(),
+        jvm_args: Mutex::new(cloned_jvm_args),
+        envs: Mutex::new(source.envs.lock().unwrap().clone()),
         run_mode: source.run_mode.clone(),
         process: Mutex::new(None),
         state: Mutex::new(crate::state::StateManager::new(&repo)),
@@ -1208,10 +1218,12 @@ async fn target_get_env(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
+    let jvm_args = t.jvm_args.lock().unwrap().clone();
+    let envs = t.envs.lock().unwrap().clone();
     Ok(Json(serde_json::json!({
         "target": name,
-        "jvm_args": t.jvm_args,
-        "envs": t.envs,
+        "jvm_args": jvm_args,
+        "envs": envs,
     })))
 }
 
@@ -1275,10 +1287,18 @@ async fn target_put_env(
     std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Update live target state
+    if let Some(ref ja) = body.jvm_args {
+        *t.jvm_args.lock().unwrap() = if ja.is_empty() { None } else { Some(ja.clone()) };
+    }
+    if let Some(ref envs) = body.envs {
+        *t.envs.lock().unwrap() = envs.clone();
+    }
+
     Ok(Json(serde_json::json!({
         "status": "ok",
         "target": name,
-        "hint": "Changes saved to config. They will take effect on next deploy."
+        "hint": "Changes saved. They will take effect on next deploy."
     })))
 }
 

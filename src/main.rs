@@ -97,8 +97,8 @@ async fn main() -> anyhow::Result<()> {
             run_cmd,
             health_url,
             health_timeout,
-            jvm_args,
-            envs,
+            jvm_args: Mutex::new(jvm_args),
+            envs: Mutex::new(envs),
             run_mode,
             process: Mutex::new(None),
             state: Mutex::new(state::StateManager::new(&entry.repo)),
@@ -219,6 +219,9 @@ pub async fn poll_loop(
         let _guard = build_lock.inner.lock().await;
         build_lock.set_current(Some(target.name.clone()));
 
+        let jvm_args = target.jvm_args.lock().unwrap().clone();
+        let envs = target.envs.lock().unwrap().clone();
+
         if let Err(e) = api::build_and_cache(
             &target.repo,
             &target.remote,
@@ -231,8 +234,8 @@ pub async fn poll_loop(
             target.run_cmd.as_deref(),
             target.health_url.as_deref(),
             target.health_timeout,
-            target.jvm_args.as_deref(),
-            Some(&target.envs),
+            jvm_args.as_deref(),
+            Some(&envs),
             &target.run_mode,
             Some(&tx),
             &target.name,
