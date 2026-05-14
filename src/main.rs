@@ -67,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
         let run_cmd = proj.run.command;
         let health_url = proj.run.health_url;
         let health_timeout = proj.run.health_timeout;
+        let jvm_args = proj.run.jvm_args;
+        let envs = proj.env.map(|e| e.vars).unwrap_or_default();
 
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
@@ -78,6 +80,8 @@ async fn main() -> anyhow::Result<()> {
             run_cmd,
             health_url,
             health_timeout,
+            jvm_args,
+            envs,
             process: Mutex::new(None),
             state: Mutex::new(state::StateManager::new(&entry.repo)),
             profile: entry.profile.clone(),
@@ -187,6 +191,8 @@ pub async fn poll_loop(
             target.run_cmd.as_deref(),
             target.health_url.as_deref(),
             target.health_timeout,
+            target.jvm_args.as_deref(),
+            Some(&target.envs),
             Some(&tx),
             &target.name,
         )

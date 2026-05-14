@@ -39,6 +39,8 @@ pub struct TargetState {
     pub run_cmd: Option<String>,
     pub health_url: Option<String>,
     pub health_timeout: u64,
+    pub jvm_args: Option<String>,
+    pub envs: HashMap<String, String>,
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
     pub profile: Option<String>,
@@ -288,6 +290,8 @@ async fn target_rollback(
 
     let used_cache = try_rollback_with_cache(
         &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to,
+        t.jvm_args.as_deref(),
+        Some(&t.envs),
     )
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -297,6 +301,8 @@ async fn target_rollback(
             &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to,
+            t.jvm_args.as_deref(),
+            Some(&t.envs),
             Some(&s.tx), &t.name,
         )
         .await
@@ -354,6 +360,8 @@ async fn target_deploy(
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
+        t.jvm_args.as_deref(),
+        Some(&t.envs),
         Some(&s.tx), &t.name,
     )
     .await
@@ -389,6 +397,8 @@ pub async fn build_and_cache(
     run_cmd: Option<&str>,
     health_url: Option<&str>,
     health_timeout: u64,
+    jvm_args: Option<&str>,
+    envs: Option<&HashMap<String, String>>,
     tx: Option<&broadcast::Sender<WsEvent>>,
     target_name: &str,
 ) -> anyhow::Result<()> {
@@ -410,8 +420,21 @@ pub async fn build_and_cache(
         });
     }
 
+    // Resolve build command placeholders
+    let resolved_build = crate::project::ProjectConfig::load(repo, None)
+        .ok()
+        .flatten()
+        .map(|c| {
+            let mut cmd = build_cmd.to_string();
+            if let Some(ref s) = c.build.maven_settings {
+                cmd = cmd.replace("{maven_settings}", s);
+            }
+            cmd
+        })
+        .unwrap_or_else(|| build_cmd.to_string());
+
     let output = Command::new(shell)
-        .args([flag, build_cmd])
+        .args([flag, &resolved_build])
         .current_dir(repo)
         .output()?;
 
@@ -442,12 +465,15 @@ pub async fn build_and_cache(
             if let Some(ref mut old) = *proc {
                 old.kill();
             }
-            let resolved = if let Some(art) = artifact_rel {
+            let mut resolved = if let Some(art) = artifact_rel {
                 cmd.replace("{artifact}", &art.display().to_string())
             } else {
                 cmd.to_string()
             };
-            match ManagedProcess::spawn(&resolved, repo) {
+            if let Some(ref ja) = jvm_args {
+                resolved = resolved.replace("{jvm_args}", ja);
+            }
+            match ManagedProcess::spawn(&resolved, repo, envs) {
                 Ok(p) => *proc = Some(p),
                 Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
             }
@@ -495,6 +521,8 @@ pub fn try_rollback_with_cache(
     run_cmd: Option<&str>,
     _health_url: Option<&str>,
     _health_timeout: u64,
+    jvm_args: Option<&str>,
+    envs: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<bool> {
     let st = state.lock().unwrap();
     let short = crate::git::short_hash(repo, commit_hash)
@@ -514,12 +542,15 @@ pub fn try_rollback_with_cache(
             if let Some(ref mut old) = *proc {
                 old.kill();
             }
-            let resolved = if let Some(art) = artifact_rel {
+            let mut resolved = if let Some(art) = artifact_rel {
                 cmd.replace("{artifact}", &art.display().to_string())
             } else {
                 cmd.to_string()
             };
-            match ManagedProcess::spawn(&resolved, repo) {
+            if let Some(ref ja) = jvm_args {
+                resolved = resolved.replace("{jvm_args}", ja);
+            }
+            match ManagedProcess::spawn(&resolved, repo, envs) {
                 Ok(p) => *proc = Some(p),
                 Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
             }
@@ -764,6 +795,8 @@ async fn target_clone(
         run_cmd: cloned_run_cmd,
         health_url: cloned_health_url,
         health_timeout: source.health_timeout,
+        jvm_args: source.jvm_args.as_ref().map(|j| increment_port(j)),
+        envs: source.envs.clone(),
         process: Mutex::new(None),
         state: Mutex::new(crate::state::StateManager::new(&source.repo)),
         profile: Some(new_name.clone()),
@@ -901,6 +934,146 @@ async fn self_update_handler(
     }
 }
 
+// ── Config file read/write ──
+
+#[derive(Deserialize)]
+struct ConfigBody {
+    content: String,
+}
+
+/// GET /api/targets/{name}/config — read raw .deployd/config.toml
+async fn target_get_config(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let config = crate::project::ProjectConfig::read_config_raw(&t.repo, t.profile.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .unwrap_or_default();
+
+    let path = crate::project::ProjectConfig::config_path(&t.repo, t.profile.as_deref());
+
+    Ok(Json(serde_json::json!({
+        "target": name,
+        "path": path.display().to_string(),
+        "content": config,
+    })))
+}
+
+/// PUT /api/targets/{name}/config — write .deployd/config.toml
+async fn target_put_config(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    crate::project::ProjectConfig::save_config(&t.repo, t.profile.as_deref(), &body.content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({"status": "ok", "target": name})))
+}
+
+// ── Maven settings file read/write ──
+
+fn resolve_maven_settings_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
+    crate::project::ProjectConfig::load(repo, profile.map(|s| s.as_str()))
+        .ok()
+        .flatten()
+        .and_then(|c| c.build.maven_settings)
+}
+
+/// GET /api/targets/{name}/maven-settings — read maven settings.xml
+async fn target_get_maven_settings(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let settings_path = resolve_maven_settings_path(&t.repo, t.profile.as_ref());
+
+    let (path, content) = match settings_path {
+        Some(p) => {
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| (StatusCode::NOT_FOUND, format!("cannot read {}: {}", p, e)))?;
+            (p, content)
+        }
+        None => (String::new(), String::new()),
+    };
+
+    Ok(Json(serde_json::json!({
+        "target": name,
+        "path": path,
+        "content": content,
+    })))
+}
+
+/// PUT /api/targets/{name}/maven-settings — write maven settings.xml
+async fn target_put_maven_settings(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let settings_path = resolve_maven_settings_path(&t.repo, t.profile.as_ref())
+        .ok_or((StatusCode::BAD_REQUEST, "maven_settings not configured in .deployd/config.toml".into()))?;
+
+    if let Some(parent) = std::path::Path::new(&settings_path).parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    std::fs::write(&settings_path, &body.content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({"status": "ok", "target": name, "path": settings_path})))
+}
+
+// ── Local repo path ──
+
+fn resolve_local_repo_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
+    crate::project::ProjectConfig::load(repo, profile.map(|s| s.as_str()))
+        .ok()
+        .flatten()
+        .and_then(|c| c.build.local_repo)
+}
+
+/// GET /api/targets/{name}/local-repo
+async fn target_get_local_repo(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let path = resolve_local_repo_path(&t.repo, t.profile.as_ref()).unwrap_or_default();
+
+    Ok(Json(serde_json::json!({
+        "target": name,
+        "local_repo": path,
+    })))
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
@@ -918,6 +1091,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/branches", get(target_branches))
         .route("/api/targets/{name}/fetch", post(target_fetch))
         .route("/api/targets/{name}/clone", post(target_clone))
+        .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
+        .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
+        .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
         .with_state(state)

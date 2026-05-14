@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, Command};
 
@@ -6,13 +7,17 @@ pub struct ManagedProcess {
 }
 
 impl ManagedProcess {
-    pub fn spawn(cmd: &str, repo: &Path) -> anyhow::Result<Self> {
+    pub fn spawn(cmd: &str, repo: &Path, envs: Option<&HashMap<String, String>>) -> anyhow::Result<Self> {
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
         let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
-        let child = Command::new(shell)
-            .args([flag, cmd])
-            .current_dir(repo)
-            .spawn()?;
+        let mut c = Command::new(shell);
+        c.args([flag, cmd]).current_dir(repo);
+        if let Some(envs) = envs {
+            for (k, v) in envs {
+                c.env(k, v);
+            }
+        }
+        let child = c.spawn()?;
         Ok(Self { child: Some(child) })
     }
 

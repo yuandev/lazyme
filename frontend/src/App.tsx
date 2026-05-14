@@ -3,6 +3,7 @@ import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
   fetchTarget as fetchTargetApi, cloneTarget, fetchQueue,
+  fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
@@ -145,7 +146,7 @@ function App() {
 }
 
 function TargetDetail({ name }: { name: string }) {
-  const [tab, setTab] = useState<'status' | 'commits' | 'history'>('status');
+  const [tab, setTab] = useState<'status' | 'commits' | 'history' | 'config'>('status');
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [history, setHistory] = useState<DeployRecord[]>([]);
@@ -243,13 +244,13 @@ function TargetDetail({ name }: { name: string }) {
       </div>
 
       <div style={s.tabs}>
-        {(['status', 'commits', 'history'] as const).map((t) => (
+        {(['status', 'commits', 'history', 'config'] as const).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}
           >
-            {t === 'status' ? 'Status' : t === 'commits' ? 'Commits' : 'History'}
+            {t === 'status' ? 'Status' : t === 'commits' ? 'Commits' : t === 'history' ? 'History' : 'Config'}
           </button>
         ))}
       </div>
@@ -349,10 +350,143 @@ function TargetDetail({ name }: { name: string }) {
         </div>
       )}
 
+      {tab === 'config' && (
+        <ConfigEditor name={name} />
+      )}
+
       {logHash && (
         <div style={s.card}>
           <h3 style={s.cardTitle}>Build Log: {logHash}</h3>
           <pre style={s.log}>{log}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfigEditor({ name }: { name: string }) {
+  const [config, setConfig] = useState('');
+  const [configPath, setConfigPath] = useState('');
+  const [mavenSettings, setMavenSettings] = useState('');
+  const [mavenSettingsPath, setMavenSettingsPath] = useState('');
+  const [localRepo, setLocalRepo] = useState('');
+  const [subTab, setSubTab] = useState<'config' | 'maven' | 'repo'>('config');
+  const [saving, setSaving] = useState(false);
+  const [statusMsg, setStatusMsg] = useState('');
+
+  const load = useCallback(async () => {
+    try {
+      const [cfg, ms, lr] = await Promise.all([
+        fetchConfig(name),
+        fetchMavenSettings(name),
+        fetchLocalRepo(name),
+      ]);
+      setConfig(cfg.content);
+      setConfigPath(cfg.path);
+      setMavenSettings(ms.content);
+      setMavenSettingsPath(ms.path);
+      setLocalRepo(lr.local_repo);
+    } catch {
+      // config may not exist yet
+    }
+  }, [name]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async (fn: () => Promise<void>) => {
+    setSaving(true);
+    setStatusMsg('');
+    try {
+      await fn();
+      setStatusMsg('Saved ✓');
+    } catch (e: any) {
+      setStatusMsg(`Error: ${e.message || e}`);
+    }
+    setSaving(false);
+  };
+
+  const styles = {
+    textarea: { width: '100%', minHeight: 200, background: '#0f172a', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 6, padding: '0.75rem', fontFamily: 'monospace', fontSize: '0.8rem', resize: 'vertical' as const },
+    input: { width: '100%', background: '#0f172a', color: '#e2e8f0', border: '1px solid #334155', borderRadius: 6, padding: '0.5rem 0.75rem', fontFamily: 'monospace', fontSize: '0.85rem' },
+    btn: { ...s.btnPrimary, padding: '0.4rem 0.9rem', fontSize: '0.8rem' },
+    subTab: (tab: string) => ({ ...s.tab, ...(subTab === tab ? s.tabActive : {}) }),
+    pathLabel: { fontSize: '0.7rem', color: '#64748b', marginBottom: '0.5rem', fontFamily: 'monospace' },
+    status: { fontSize: '0.8rem', color: statusMsg.startsWith('Error') ? '#fca5a5' : '#4ade80', marginLeft: '0.75rem' },
+  };
+
+  return (
+    <div>
+      <div style={{ ...s.tabs, marginBottom: '0.75rem' }}>
+        <button onClick={() => setSubTab('config')} style={styles.subTab('config')}>.deployd/config.toml</button>
+        <button onClick={() => setSubTab('maven')} style={styles.subTab('maven')}>Maven Settings</button>
+        <button onClick={() => setSubTab('repo')} style={styles.subTab('repo')}>Local Repo</button>
+      </div>
+
+      {subTab === 'config' && (
+        <div style={s.card}>
+          <div style={styles.pathLabel}>{configPath || '~/.deployd/config.toml'}</div>
+          <textarea
+            value={config}
+            onChange={(e) => setConfig(e.target.value)}
+            style={styles.textarea}
+            spellCheck={false}
+          />
+          <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              onClick={() => save(async () => { await saveConfig(name, config); })}
+              disabled={saving}
+              style={styles.btn}
+            >
+              {saving ? 'Saving...' : 'Save config'}
+            </button>
+            <span style={styles.status}>{statusMsg}</span>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'maven' && (
+        <div style={s.card}>
+          <div style={styles.pathLabel}>{mavenSettingsPath || 'No maven_settings configured in config.toml'}</div>
+          <textarea
+            value={mavenSettings}
+            onChange={(e) => setMavenSettings(e.target.value)}
+            style={{ ...styles.textarea, minHeight: 400 }}
+            spellCheck={false}
+          />
+          <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              onClick={() => save(async () => { await saveMavenSettings(name, mavenSettings); })}
+              disabled={saving || !mavenSettingsPath}
+              style={{ ...styles.btn, ...(!mavenSettingsPath ? s.btnDisabled : {}) }}
+            >
+              {saving ? 'Saving...' : 'Save settings'}
+            </button>
+            <span style={styles.status}>{statusMsg}</span>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'repo' && (
+        <div style={s.card}>
+          <div style={s.grid}>
+            <div style={s.itemWrap}>
+              <span style={s.label}>Local Maven Repository</span>
+              <span style={{ ...s.value, fontFamily: 'monospace', fontSize: '0.8rem', color: '#38bdf8' }}>
+                {localRepo || 'Not configured'}
+              </span>
+            </div>
+          </div>
+          {localRepo && (
+            <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#64748b' }}>
+              <a
+                href={`#`}
+                onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(localRepo); }}
+                style={{ color: '#7dd3fc', textDecoration: 'none' }}
+              >
+                📋 Copy path
+              </a>
+            </div>
+          )}
         </div>
       )}
     </div>

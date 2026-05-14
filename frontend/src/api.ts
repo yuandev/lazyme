@@ -134,3 +134,51 @@ export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();
 }
+
+export interface ConfigResponse {
+  target: string;
+  path: string;
+  content: string;
+}
+
+export async function fetchConfig(name: string): Promise<ConfigResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/config`);
+  return res.json();
+}
+
+export async function saveConfig(name: string, content: string): Promise<void> {
+  await fetch(`${API}/targets/${encodeURIComponent(name)}/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+}
+
+export interface MavenSettingsResponse {
+  target: string;
+  path: string;
+  content: string;
+}
+
+export async function fetchMavenSettings(name: string): Promise<MavenSettingsResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/maven-settings`);
+  return res.json();
+}
+
+export async function saveMavenSettings(name: string, content: string): Promise<void> {
+  await fetch(`${API}/targets/${encodeURIComponent(name)}/maven-settings`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+}
+
+export interface LocalRepoResponse {
+  target: string;
+  local_repo: string;
+}
+
+export async function fetchLocalRepo(name: string): Promise<LocalRepoResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/local-repo`);
+  return res.json();
+}
