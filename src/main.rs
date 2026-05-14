@@ -5,6 +5,7 @@ mod process;
 mod project;
 mod queue;
 mod registry;
+mod self_update;
 mod state;
 
 use api::{AppState, TargetState};
@@ -31,6 +32,16 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = config::Args::parse();
+
+    // Self-update check (warn if newer version available)
+    let self_update_repo = args
+        .self_update_repo
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    if let Ok(Some(remote)) = self_update::check(&self_update_repo, "main") {
+        warn!("lazyme update available: {remote}. POST /api/self-update to update.");
+    }
 
     // Load target registry
     let targets = registry::load()?;
@@ -79,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
         interval: args.interval,
         tx,
         build_lock: build_lock.clone(),
+        self_update_repo,
     });
 
     // Start one poller per target

@@ -17,4 +17,8 @@ pub struct Args {
 
     /// One or more target names to watch (default: all from targets.toml)
     pub filter: Vec<String>,
+
+    /// Path to deployd source repo for self-update (default: built-in manifest dir)
+    #[arg(long)]
+    pub self_update_repo: Option<String>,
 }

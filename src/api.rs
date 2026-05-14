@@ -25,6 +25,7 @@ pub struct AppState {
     pub interval: u64,
     pub tx: broadcast::Sender<WsEvent>,
     pub build_lock: Arc<BuildLock>,
+    pub self_update_repo: PathBuf,
 }
 
 /// Per-target configuration and state.
@@ -622,6 +623,19 @@ async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
     })
 }
 
+// ── Self-update ──
+
+/// POST /api/self-update — git pull + cargo build + restart
+async fn self_update_handler(
+    State(s): State<SharedState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let new_hash = crate::self_update::update(&s.self_update_repo, "main")
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    tracing::info!("Self-update to {new_hash} complete, restarting...");
+    crate::self_update::restart();
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
@@ -637,5 +651,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/deploy", post(target_deploy))
         .route("/api/targets/{name}/branch", post(target_set_branch))
         .route("/api/reload", post(reload_config))
+        .route("/api/self-update", post(self_update_handler))
         .with_state(state)
 }
