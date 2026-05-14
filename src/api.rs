@@ -41,6 +41,7 @@ pub struct TargetState {
     pub health_timeout: u64,
     pub jvm_args: Option<String>,
     pub envs: HashMap<String, String>,
+    pub run_mode: String,
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
     pub profile: Option<String>,
@@ -94,6 +95,7 @@ struct StatusResponse {
     health_url: Option<String>,
     build_cmd: String,
     run_cmd: Option<String>,
+    run_mode: String,
 }
 
 #[derive(Serialize)]
@@ -204,6 +206,7 @@ async fn target_status(
         health_url: t.health_url.clone(),
         build_cmd: t.build_cmd.clone(),
         run_cmd: t.run_cmd.clone(),
+        run_mode: t.run_mode.clone(),
     }))
 }
 
@@ -307,6 +310,7 @@ async fn target_rollback(
             &body.commit, &t.state, &t.process, run, health, health_to,
             t.jvm_args.as_deref(),
             Some(&t.envs),
+            &t.run_mode,
             Some(&s.tx), &t.name,
         )
         .await
@@ -366,6 +370,7 @@ async fn target_deploy(
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
         t.jvm_args.as_deref(),
         Some(&t.envs),
+        &t.run_mode,
         Some(&s.tx), &t.name,
     )
     .await
@@ -403,6 +408,7 @@ pub async fn build_and_cache(
     health_timeout: u64,
     jvm_args: Option<&str>,
     envs: Option<&HashMap<String, String>>,
+    run_mode: &str,
     tx: Option<&broadcast::Sender<WsEvent>>,
     target_name: &str,
 ) -> anyhow::Result<()> {
@@ -414,52 +420,63 @@ pub async fn build_and_cache(
     let short = crate::git::short_hash(repo, commit_hash)
         .unwrap_or_else(|_| commit_hash[..7].to_string());
 
-    // Broadcast build started
-    if let Some(tx) = tx {
-        let _ = tx.send(WsEvent {
-            event: "build_started".into(),
-            target: target_name.into(),
-            commit: Some(short.clone()),
-            message: None,
-        });
+    let is_dev = run_mode == "dev";
+
+    // Broadcast build started (skip build in dev mode)
+    if !is_dev {
+        if let Some(tx) = tx {
+            let _ = tx.send(WsEvent {
+                event: "build_started".into(),
+                target: target_name.into(),
+                commit: Some(short.clone()),
+                message: None,
+            });
+        }
     }
 
-    // Resolve build command placeholders
-    let resolved_build = crate::project::ProjectConfig::load(repo, None)
-        .ok()
-        .flatten()
-        .map(|c| {
-            let mut cmd = build_cmd.to_string();
-            if let Some(ref s) = c.build.maven_settings {
-                cmd = cmd.replace("{maven_settings}", s);
+    // Build step — skipped in dev mode
+    let (success, log_path, cache_path) = if is_dev {
+        (true, None, None)
+    } else {
+        // Resolve build command placeholders
+        let resolved_build = crate::project::ProjectConfig::load(repo, None)
+            .ok()
+            .flatten()
+            .map(|c| {
+                let mut cmd = build_cmd.to_string();
+                if let Some(ref s) = c.build.maven_settings {
+                    cmd = cmd.replace("{maven_settings}", s);
+                }
+                cmd
+            })
+            .unwrap_or_else(|| build_cmd.to_string());
+
+        let output = Command::new(shell)
+            .args([flag, &resolved_build])
+            .current_dir(repo)
+            .output()?;
+
+        let success = output.status.success();
+
+        // Persist build log
+        let log_dir = repo.join(".deployd").join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join(format!("{short}.log"));
+        let _ = std::fs::write(&log_path, &output.stdout);
+        let log_path = if log_path.exists() { Some(log_path) } else { None };
+
+        let cache_path = if success {
+            if let Some(artifact) = artifact_rel {
+                let st = state.lock().unwrap();
+                st.cache_artifact(&short, artifact).ok()
+            } else {
+                None
             }
-            cmd
-        })
-        .unwrap_or_else(|| build_cmd.to_string());
-
-    let output = Command::new(shell)
-        .args([flag, &resolved_build])
-        .current_dir(repo)
-        .output()?;
-
-    let success = output.status.success();
-
-    // Persist build log
-    let log_dir = repo.join(".deployd").join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join(format!("{short}.log"));
-    let _ = std::fs::write(&log_path, &output.stdout);
-    let log_path = if log_path.exists() { Some(log_path) } else { None };
-
-    let cache_path = if success {
-        if let Some(artifact) = artifact_rel {
-            let st = state.lock().unwrap();
-            st.cache_artifact(&short, artifact).ok()
         } else {
             None
-        }
-    } else {
-        None
+        };
+
+        (success, log_path, cache_path)
     };
 
     // Kill old process, start new one
@@ -801,6 +818,7 @@ async fn target_clone(
         health_timeout: source.health_timeout,
         jvm_args: source.jvm_args.as_ref().map(|j| increment_port(j)),
         envs: source.envs.clone(),
+        run_mode: source.run_mode.clone(),
         process: Mutex::new(None),
         state: Mutex::new(crate::state::StateManager::new(&source.repo)),
         profile: Some(new_name.clone()),

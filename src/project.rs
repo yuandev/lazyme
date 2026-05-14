@@ -31,6 +31,8 @@ pub struct BuildSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RunSection {
+    /// Run mode: "dev" or "deploy". dev skips build & cache, just pulls and restarts run command.
+    pub mode: Option<String>,
     /// Shell command to start the deployed service. {artifact}, {jvm_args} are replaced.
     pub command: Option<String>,
     /// Health check endpoint
