@@ -34,6 +34,7 @@ export interface StatusResponse {
   health_url: string | null;
   build_cmd: string;
   run_cmd: string | null;
+  run_mode: string;
 }
 
 export interface CommitInfo {

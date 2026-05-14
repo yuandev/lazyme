@@ -331,6 +331,7 @@ function TargetDetail({ name }: { name: string }) {
               <Item label="Remote HEAD" value={status.remote_commit?.substring(0, 7) ?? '?'} />
               <Item label="Branch" value={status.branch} />
               <Item label="Interval" value={`${status.interval_secs}s`} />
+              <Item label="Mode" value={status.run_mode} />
               <Item label="Build" value={status.build_cmd} />
               <Item label="Run" value={status.run_cmd ?? '—'} />
             </div>
