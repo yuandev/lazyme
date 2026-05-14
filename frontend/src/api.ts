@@ -32,6 +32,8 @@ export interface StatusResponse {
   interval_secs: number;
   process_running: boolean;
   health_url: string | null;
+  build_cmd: string;
+  run_cmd: string | null;
 }
 
 export interface CommitInfo {
@@ -190,4 +192,23 @@ export interface LocalRepoResponse {
 export async function fetchLocalRepo(name: string): Promise<LocalRepoResponse> {
   const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/local-repo`);
   return res.json();
+}
+
+export interface ViteConfigResponse {
+  target: string;
+  path: string;
+  content: string;
+}
+
+export async function fetchViteConfig(name: string): Promise<ViteConfigResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/vite-config`);
+  return res.json();
+}
+
+export async function saveViteConfig(name: string, content: string): Promise<void> {
+  await fetch(`${API}/targets/${encodeURIComponent(name)}/vite-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
 }

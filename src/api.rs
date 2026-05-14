@@ -92,6 +92,8 @@ struct StatusResponse {
     interval_secs: u64,
     process_running: bool,
     health_url: Option<String>,
+    build_cmd: String,
+    run_cmd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -200,6 +202,8 @@ async fn target_status(
         interval_secs: s.interval,
         process_running: running,
         health_url: t.health_url.clone(),
+        build_cmd: t.build_cmd.clone(),
+        run_cmd: t.run_cmd.clone(),
     }))
 }
 
@@ -1065,6 +1069,53 @@ async fn target_put_maven_settings(
     Ok(Json(serde_json::json!({"status": "ok", "target": name, "path": settings_path})))
 }
 
+// ── Vite config file read/write ──
+
+/// GET /api/targets/{name}/vite-config — read {repo}/vite.config.ts
+async fn target_get_vite_config(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let path = t.repo.join("vite.config.ts");
+    let content = if path.exists() {
+        std::fs::read_to_string(&path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        String::new()
+    };
+
+    Ok(Json(serde_json::json!({
+        "target": name,
+        "path": path.display().to_string(),
+        "content": content,
+    })))
+}
+
+/// PUT /api/targets/{name}/vite-config — write {repo}/vite.config.ts
+async fn target_put_vite_config(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<ConfigBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let path = t.repo.join("vite.config.ts");
+    std::fs::write(&path, &body.content)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({"status": "ok", "target": name, "path": path.display().to_string()})))
+}
+
 // ── Local repo path ──
 
 fn resolve_local_repo_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
@@ -1120,6 +1171,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/clone", post(target_clone))
         .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
         .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
+        .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))

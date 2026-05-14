@@ -4,6 +4,7 @@ import {
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
   fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
+  fetchViteConfig, saveViteConfig,
   restartServer,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
@@ -255,7 +256,24 @@ function TargetDetail({ name }: { name: string }) {
         <span style={s.detailRepo}>{status.repo}</span>
         <span style={s.detailBranch}>@{status.branch}</span>
         {status.process_running && <span style={s.badgeGreen}>running</span>}
-        {status.health_url && <span style={s.badgeCache}>health: {status.health_url}</span>}
+        {status.health_url && (
+          <>
+            <span style={s.badgeCache}>health: {status.health_url}</span>
+            <button
+              onClick={() => {
+                try {
+                  const u = new URL(status.health_url!);
+                  window.open(u.origin, '_blank');
+                } catch { /* invalid url */ }
+              }}
+              title="Open service in browser"
+              style={s.btnOpen}
+            >open</button>
+          </>
+        )}
+        {status.run_cmd && (
+          <span style={s.runCmd} title={status.run_cmd}>{status.run_cmd}</span>
+        )}
       </div>
 
       <div style={s.tabs}>
@@ -313,6 +331,8 @@ function TargetDetail({ name }: { name: string }) {
               <Item label="Remote HEAD" value={status.remote_commit?.substring(0, 7) ?? '?'} />
               <Item label="Branch" value={status.branch} />
               <Item label="Interval" value={`${status.interval_secs}s`} />
+              <Item label="Build" value={status.build_cmd} />
+              <Item label="Run" value={status.run_cmd ?? '—'} />
             </div>
           </div>
         </div>
@@ -384,22 +404,27 @@ function ConfigEditor({ name }: { name: string }) {
   const [configPath, setConfigPath] = useState('');
   const [mavenSettings, setMavenSettings] = useState('');
   const [mavenSettingsPath, setMavenSettingsPath] = useState('');
+  const [viteConfig, setViteConfig] = useState('');
+  const [viteConfigPath, setViteConfigPath] = useState('');
   const [localRepo, setLocalRepo] = useState('');
-  const [subTab, setSubTab] = useState<'config' | 'maven' | 'repo'>('config');
+  const [subTab, setSubTab] = useState<'config' | 'maven' | 'vite' | 'repo'>('config');
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [cfg, ms, lr] = await Promise.all([
+      const [cfg, ms, vc, lr] = await Promise.all([
         fetchConfig(name),
         fetchMavenSettings(name),
+        fetchViteConfig(name),
         fetchLocalRepo(name),
       ]);
       setConfig(cfg.content);
       setConfigPath(cfg.path);
       setMavenSettings(ms.content);
       setMavenSettingsPath(ms.path);
+      setViteConfig(vc.content);
+      setViteConfigPath(vc.path);
       setLocalRepo(lr.local_repo);
     } catch {
       // config may not exist yet
@@ -434,6 +459,7 @@ function ConfigEditor({ name }: { name: string }) {
       <div style={{ ...s.tabs, marginBottom: '0.75rem' }}>
         <button onClick={() => setSubTab('config')} style={styles.subTab('config')}>.deployd/config.toml</button>
         <button onClick={() => setSubTab('maven')} style={styles.subTab('maven')}>Maven Settings</button>
+        <button onClick={() => setSubTab('vite')} style={styles.subTab('vite')}>Vite Config</button>
         <button onClick={() => setSubTab('repo')} style={styles.subTab('repo')}>Local Repo</button>
       </div>
 
@@ -475,6 +501,28 @@ function ConfigEditor({ name }: { name: string }) {
               style={{ ...styles.btn, ...(!mavenSettingsPath ? s.btnDisabled : {}) }}
             >
               {saving ? 'Saving...' : 'Save settings'}
+            </button>
+            <span style={styles.status}>{statusMsg}</span>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'vite' && (
+        <div style={s.card}>
+          <div style={styles.pathLabel}>{viteConfigPath || '{repo}/vite.config.ts'}</div>
+          <textarea
+            value={viteConfig}
+            onChange={(e) => setViteConfig(e.target.value)}
+            style={{ ...styles.textarea, minHeight: 300 }}
+            spellCheck={false}
+          />
+          <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              onClick={() => save(async () => { await saveViteConfig(name, viteConfig); })}
+              disabled={saving}
+              style={styles.btn}
+            >
+              {saving ? 'Saving...' : 'Save vite.config.ts'}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>
@@ -568,6 +616,8 @@ const s: Record<string, React.CSSProperties> = {
   btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc', flexShrink: 0 },
   btnFetch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#166534', color: '#4ade80', flexShrink: 0 },
   btnClone: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#581c87', color: '#c084fc', flexShrink: 0 },
+  btnOpen: { padding: '0.2rem 0.6rem', border: '1px solid #166534', borderRadius: 4, cursor: 'pointer', fontSize: '0.7rem', background: '#14532d', color: '#4ade80', flexShrink: 0 },
+  runCmd: { fontSize: '0.7rem', color: '#64748b', fontFamily: 'monospace', maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 0 },
 };
 
 export default App;
