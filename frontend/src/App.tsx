@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, fetchQueue,
@@ -7,10 +7,19 @@ import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './
 
 const REFRESH_MS = 8_000;
 
+type UpdatePhase = null | 'checking' | 'pulling' | 'building' | 'complete' | 'error';
+interface UpdateState {
+  phase: UpdatePhase;
+  commit: string | null;
+  message: string | null;
+}
+
 function App() {
   const [targets, setTargets] = useState<TargetSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [building, setBuilding] = useState<string | null>(null);
+  const [update, setUpdate] = useState<UpdateState>({ phase: null, commit: null, message: null });
+  const wsRef = useRef<WebSocket | null>(null);
 
   const refreshTargets = useCallback(async () => {
     const list = await fetchTargets();
@@ -25,11 +34,82 @@ function App() {
     return () => clearInterval(timer);
   }, [refreshTargets]);
 
+  // WebSocket connection
+  useEffect(() => {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    wsRef.current = ws;
+
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.event?.startsWith('self_update_')) {
+          setUpdate({
+            phase: data.event.replace('self_update_', '') as UpdatePhase,
+            commit: data.commit ?? null,
+            message: data.message ?? null,
+          });
+          if (data.event !== 'self_update_error' && data.event !== 'self_update_complete') {
+            refreshTargets();
+          }
+        } else {
+          refreshTargets();
+        }
+      } catch {
+        // ignore malformed messages
+      }
+    };
+
+    ws.onclose = () => { wsRef.current = null; };
+
+    return () => { ws.close(); };
+  }, [refreshTargets]);
+
+  const triggerSelfUpdate = async () => {
+    setUpdate({ phase: 'checking', commit: null, message: null });
+    const res = await fetch('/api/self-update', { method: 'POST' });
+    const data = await res.json();
+    if (data.status === 'up_to_date') {
+      setUpdate({ phase: null, commit: null, message: 'Already up to date' });
+    } else if (data.status === 'error') {
+      setUpdate({ phase: 'error', commit: null, message: data.message });
+    }
+    // 'updating' — WS events will drive the UI
+  };
+
+  const updateLabel = () => {
+    if (!update.phase) return update.message ? '✓' : 'update';
+    switch (update.phase) {
+      case 'checking': return 'checking...';
+      case 'pulling': return 'pulling...';
+      case 'building': return 'building...';
+      case 'complete': return 'restarting...';
+      case 'error': return 'error';
+    }
+  };
+
+  const updateStyle = (): React.CSSProperties => {
+    const base = { ...s.headerBtn };
+    if (update.phase === 'error') return { ...base, background: '#7f1d1d', color: '#fca5a5' };
+    if (update.phase && update.phase !== 'complete') return { ...base, background: '#713f12', color: '#facc15' };
+    if (update.phase === 'complete') return { ...base, background: '#166534', color: '#4ade80' };
+    if (update.message === 'Already up to date') return { ...base, color: '#4ade80' };
+    return base;
+  };
+
   return (
     <div style={s.container}>
       <header style={s.header}>
         <h1 style={s.title}>deployd</h1>
         {building && <span style={s.buildingBadge}>building: {building}</span>}
+        <div style={{ flex: 1 }} />
+        <button
+          onClick={triggerSelfUpdate}
+          disabled={!!update.phase}
+          style={updateStyle()}
+        >
+          {updateLabel()}
+        </button>
       </header>
       <div style={s.body}>
         <aside style={s.sidebar}>
@@ -221,6 +301,7 @@ const s: Record<string, React.CSSProperties> = {
   header: { padding: '1rem 2rem', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', gap: '1rem' },
   title: { fontSize: '1.25rem', color: '#38bdf8', margin: 0 },
   buildingBadge: { padding: '0.2rem 0.6rem', borderRadius: 999, fontSize: '0.75rem', background: '#713f12', color: '#facc15' },
+  headerBtn: { padding: '0.3rem 0.8rem', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: '0.75rem', background: '#1e293b', color: '#94a3b8' },
   body: { display: 'flex', height: 'calc(100vh - 60px)' },
   sidebar: { width: 260, borderRight: '1px solid #1e293b', padding: '1rem', overflow: 'auto', flexShrink: 0 },
   main: { flex: 1, padding: '1.5rem', overflow: 'auto' },

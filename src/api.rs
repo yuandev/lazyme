@@ -625,15 +625,59 @@ async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
 
 // ── Self-update ──
 
-/// POST /api/self-update — git pull + cargo build + restart
+/// POST /api/self-update — check, pull, build, restart (runs in background)
 async fn self_update_handler(
     State(s): State<SharedState>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let new_hash = crate::self_update::update(&s.self_update_repo, "main")
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+) -> Json<serde_json::Value> {
+    let repo = s.self_update_repo.clone();
+    let tx = s.tx.clone();
 
-    tracing::info!("Self-update to {new_hash} complete, restarting...");
-    crate::self_update::restart();
+    let _ = tx.send(WsEvent {
+        event: "self_update_checking".into(),
+        target: String::new(),
+        commit: None,
+        message: None,
+    });
+
+    // Check first — return immediately with status
+    match crate::self_update::check(&repo, "main") {
+        Ok(Some(remote)) => {
+            let return_commit = remote.clone();
+            let tx2 = tx.clone();
+            tokio::spawn(async move {
+                let _ = tx2.send(WsEvent {
+                    event: "self_update_pulling".into(),
+                    target: String::new(),
+                    commit: Some(remote),
+                    message: None,
+                });
+
+                match crate::self_update::update(&repo, "main") {
+                    Ok(new_hash) => {
+                        let _ = tx2.send(WsEvent {
+                            event: "self_update_complete".into(),
+                            target: String::new(),
+                            commit: Some(new_hash),
+                            message: None,
+                        });
+                        tracing::info!("Self-update complete, restarting...");
+                        crate::self_update::restart();
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(WsEvent {
+                            event: "self_update_error".into(),
+                            target: String::new(),
+                            commit: None,
+                            message: Some(e.to_string()),
+                        });
+                    }
+                }
+            });
+            Json(serde_json::json!({"status": "updating", "commit": return_commit}))
+        }
+        Ok(None) => Json(serde_json::json!({"status": "up_to_date"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+    }
 }
 
 // ── Router ──
