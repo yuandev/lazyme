@@ -130,6 +130,11 @@ export async function cloneTarget(name: string, newName: string): Promise<{ stat
   return res.json();
 }
 
+export async function fetchVersion(): Promise<{ version: string }> {
+  const res = await fetch(`${API}/version`);
+  return res.json();
+}
+
 export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();

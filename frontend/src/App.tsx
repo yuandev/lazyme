@@ -2,24 +2,26 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
-  fetchTarget as fetchTargetApi, cloneTarget, fetchQueue,
+  fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
 const REFRESH_MS = 8_000;
 
-type UpdatePhase = null | 'checking' | 'pulling' | 'building' | 'complete' | 'error';
+type UpdatePhase = null | 'checking' | 'downloading' | 'complete' | 'error';
 interface UpdateState {
   phase: UpdatePhase;
-  commit: string | null;
-  message: string | null;
+  version: string | null;
+  progress: number; // 0-100
+  error: string | null;
 }
 
 function App() {
   const [targets, setTargets] = useState<TargetSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [building, setBuilding] = useState<string | null>(null);
-  const [update, setUpdate] = useState<UpdateState>({ phase: null, commit: null, message: null });
+  const [currentVersion, setCurrentVersion] = useState<string>('...');
+  const [update, setUpdate] = useState<UpdateState>({ phase: null, version: null, progress: 0, error: null });
   const wsRef = useRef<WebSocket | null>(null);
 
   const refreshTargets = useCallback(async () => {
@@ -30,6 +32,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    fetchVersion().then(v => setCurrentVersion(v.version));
     refreshTargets();
     const timer = setInterval(refreshTargets, REFRESH_MS);
     return () => clearInterval(timer);
@@ -44,19 +47,28 @@ function App() {
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);
-        if (data.event?.startsWith('self_update_')) {
-          setUpdate({
-            phase: data.event.replace('self_update_', '') as UpdatePhase,
-            commit: data.commit ?? null,
-            message: data.message ?? null,
-          });
-          if (data.event !== 'self_update_error' && data.event !== 'self_update_complete') {
+        switch (data.event) {
+          case 'self_update_checking':
+            setUpdate({ phase: 'checking', version: null, progress: 0, error: null });
+            break;
+          case 'self_update_pulling':
+            setUpdate(prev => ({ ...prev, phase: 'downloading', progress: 0 }));
+            break;
+          case 'self_update_progress':
+            setUpdate(prev => ({ ...prev, phase: 'downloading', progress: parseInt(data.message) || 0 }));
+            break;
+          case 'self_update_complete':
+            setUpdate({ phase: 'complete', version: data.commit, progress: 100, error: null });
+            break;
+          case 'self_update_error':
+            setUpdate(prev => ({ ...prev, phase: 'error', error: data.message }));
+            break;
+          case 'targets_changed':
             refreshTargets();
-          }
-        } else if (data.event === 'targets_changed') {
-          refreshTargets();
-        } else {
-          refreshTargets();
+            break;
+          default:
+            if (data.event?.startsWith('self_update_')) break;
+            refreshTargets();
         }
       } catch {
         // ignore malformed messages
@@ -69,50 +81,50 @@ function App() {
   }, [refreshTargets]);
 
   const triggerSelfUpdate = async () => {
-    setUpdate({ phase: 'checking', commit: null, message: null });
+    setUpdate({ phase: 'checking', version: null, progress: 0, error: null });
     const res = await fetch('/api/self-update', { method: 'POST' });
     const data = await res.json();
     if (data.status === 'up_to_date') {
-      setUpdate({ phase: null, commit: null, message: 'Already up to date' });
+      setUpdate({ phase: null, version: null, progress: 0, error: 'Already up to date' });
     } else if (data.status === 'error') {
-      setUpdate({ phase: 'error', commit: null, message: data.message });
+      setUpdate({ phase: 'error', version: null, progress: 0, error: data.message });
     }
     // 'updating' — WS events will drive the UI
-  };
-
-  const updateLabel = () => {
-    if (!update.phase) return update.message ? '✓' : 'update';
-    switch (update.phase) {
-      case 'checking': return 'checking...';
-      case 'pulling': return 'pulling...';
-      case 'building': return 'building...';
-      case 'complete': return 'restarting...';
-      case 'error': return 'error';
-    }
-  };
-
-  const updateStyle = (): React.CSSProperties => {
-    const base = { ...s.headerBtn };
-    if (update.phase === 'error') return { ...base, background: '#7f1d1d', color: '#fca5a5' };
-    if (update.phase && update.phase !== 'complete') return { ...base, background: '#713f12', color: '#facc15' };
-    if (update.phase === 'complete') return { ...base, background: '#166534', color: '#4ade80' };
-    if (update.message === 'Already up to date') return { ...base, color: '#4ade80' };
-    return base;
   };
 
   return (
     <div style={s.container}>
       <header style={s.header}>
         <h1 style={s.title}>deployd</h1>
+        <span style={s.versionTag}>v{currentVersion}</span>
         {building && <span style={s.buildingBadge}>building: {building}</span>}
+        {update.version && !update.phase && (
+          <span style={s.updateHint}>v{update.version} available</span>
+        )}
         <div style={{ flex: 1 }} />
-        <button
-          onClick={triggerSelfUpdate}
-          disabled={!!update.phase}
-          style={updateStyle()}
-        >
-          {updateLabel()}
-        </button>
+        {update.phase === 'downloading' ? (
+          <div style={s.updateBtn}>
+            <div style={{ ...s.progressBar, width: `${update.progress}%` }} />
+            <span style={s.updateBtnText}>{update.progress}%</span>
+          </div>
+        ) : (
+          <button
+            onClick={triggerSelfUpdate}
+            disabled={!!update.phase}
+            style={{
+              ...s.headerBtn,
+              ...(update.phase === 'error' ? s.updateError : {}),
+              ...(update.error === 'Already up to date' ? s.updateOk : {}),
+              ...(update.phase === 'complete' ? s.updateOk : {}),
+            }}
+          >
+            {update.phase === 'checking' ? 'checking...' :
+             update.phase === 'complete' ? 'restarting...' :
+             update.phase === 'error' ? 'error' :
+             update.version ? `update to v${update.version}` :
+             update.error ? 'up to date' : 'update'}
+          </button>
+        )}
       </header>
       <div style={s.body}>
         <aside style={s.sidebar}>
@@ -373,7 +385,14 @@ const s: Record<string, React.CSSProperties> = {
   header: { padding: '1rem 2rem', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', gap: '1rem' },
   title: { fontSize: '1.25rem', color: '#38bdf8', margin: 0 },
   buildingBadge: { padding: '0.2rem 0.6rem', borderRadius: 999, fontSize: '0.75rem', background: '#713f12', color: '#facc15' },
+  versionTag: { fontSize: '0.7rem', color: '#64748b', fontFamily: 'monospace', background: '#1e293b', padding: '0.15rem 0.4rem', borderRadius: 4 },
+  updateHint: { fontSize: '0.7rem', color: '#facc15', fontFamily: 'monospace' },
   headerBtn: { padding: '0.3rem 0.8rem', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: '0.75rem', background: '#1e293b', color: '#94a3b8' },
+  updateBtn: { position: 'relative', width: 120, height: 26, background: '#1e293b', border: '1px solid #334155', borderRadius: 6, overflow: 'hidden' },
+  progressBar: { position: 'absolute', top: 0, left: 0, height: '100%', background: '#166534', transition: 'width 0.2s' },
+  updateBtnText: { position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '0.7rem', color: '#e2e8f0', fontFamily: 'monospace' },
+  updateError: { background: '#7f1d1d', borderColor: '#991b1b', color: '#fca5a5' },
+  updateOk: { borderColor: '#166534', color: '#4ade80' },
   body: { display: 'flex', height: 'calc(100vh - 60px)' },
   sidebar: { width: 260, borderRight: '1px solid #1e293b', padding: '1rem', overflow: 'auto', flexShrink: 0 },
   main: { flex: 1, padding: '1.5rem', overflow: 'auto' },

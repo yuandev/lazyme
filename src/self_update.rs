@@ -1,6 +1,7 @@
 use serde::Deserialize;
+use std::io::Write;
 
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CURRENT_TARGET: &str = env!("TARGET");
 
 #[derive(Deserialize)]
@@ -34,8 +35,12 @@ pub async fn check(owner: &str, repo: &str) -> anyhow::Result<Option<String>> {
     }
 }
 
-/// Download the latest binary for the current platform, replace this binary.
-pub async fn update(owner: &str, repo: &str) -> anyhow::Result<String> {
+/// Download the latest binary with progress, replace this binary.
+pub async fn update_with_progress(
+    owner: &str,
+    repo: &str,
+    on_progress: impl Fn(u64, u64) + Send + 'static,
+) -> anyhow::Result<String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
     let client = reqwest::Client::builder()
         .user_agent("deployd")
@@ -52,9 +57,19 @@ pub async fn update(owner: &str, repo: &str) -> anyhow::Result<String> {
     let current_exe = std::env::current_exe()?;
     let tmp = current_exe.with_extension("tmp");
 
-    let resp = client.get(&asset.browser_download_url).send().await?;
-    let bytes = resp.bytes().await?;
-    std::fs::write(&tmp, &bytes)?;
+    // Stream download with progress
+    let mut resp = client.get(&asset.browser_download_url).send().await?;
+    let total = resp.content_length().unwrap_or(0);
+    let mut file = std::fs::File::create(&tmp)?;
+    let mut downloaded: u64 = 0;
+    let mut buf = vec![0u8; 65536];
+
+    while let Some(chunk) = resp.chunk().await? {
+        file.write_all(&chunk)?;
+        downloaded += chunk.len() as u64;
+        on_progress(downloaded, total);
+    }
+    drop(file);
 
     // Make executable on unix
     #[cfg(unix)]
