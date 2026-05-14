@@ -60,4 +60,30 @@ impl ProjectConfig {
         let content = std::fs::read_to_string(&path)?;
         Ok(Some(toml::from_str(&content)?))
     }
+
+    /// Save the branch name into the project config file (preserves existing keys).
+    pub fn save_branch(repo: &Path, profile: Option<&str>, branch: &str) -> Result<()> {
+        let deploy_dir = repo.join(".deployd");
+        std::fs::create_dir_all(&deploy_dir)?;
+        let path = if let Some(p) = profile {
+            deploy_dir.join(format!("config.{p}.toml"))
+        } else {
+            deploy_dir.join("config.toml")
+        };
+
+        let mut table: toml::Table = if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            toml::from_str(&content).unwrap_or_default()
+        } else {
+            toml::Table::new()
+        };
+
+        let watch = table.entry("watch").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let toml::Value::Table(w) = watch {
+            w.insert("branch".into(), toml::Value::String(branch.to_string()));
+        }
+
+        std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+        Ok(())
+    }
 }

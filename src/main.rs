@@ -80,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
             health_timeout,
             process: Mutex::new(None),
             state: Mutex::new(state::StateManager::new(&entry.repo)),
+            profile: entry.profile.clone(),
         });
 
         target_map.insert(entry.name.clone(), ts);

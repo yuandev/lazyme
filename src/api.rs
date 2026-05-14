@@ -41,6 +41,7 @@ pub struct TargetState {
     pub health_timeout: u64,
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
+    pub profile: Option<String>,
 }
 
 impl TargetState {
@@ -568,7 +569,13 @@ async fn target_set_branch(
         ));
     }
 
-    *t.branch.lock().unwrap() = body.branch;
+    *t.branch.lock().unwrap() = body.branch.clone();
+
+    // Persist to project config
+    if let Err(e) = crate::project::ProjectConfig::save_branch(&t.repo, t.profile.as_deref(), &body.branch) {
+        tracing::warn!("Failed to save branch to config: {e}");
+    }
+
     Ok(Json(serde_json::json!({"status": "ok", "branch": t.branch()})))
 }
 
