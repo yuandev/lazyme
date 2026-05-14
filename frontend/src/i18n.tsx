@@ -1,0 +1,187 @@
+import { createContext, useContext, useState, type ReactNode } from 'react';
+
+export type Lang = 'en' | 'zh';
+
+const en = {
+  building: 'building:',
+  versionAvailable: 'v{version} available',
+  restartNow: 'restart now',
+  checking: 'checking...',
+  error: 'error',
+  updateTo: 'update to v{version}',
+  upToDate: 'up to date',
+  update: 'update',
+  never: 'never',
+  selectTarget: 'Select a target',
+  loading: 'Loading...',
+  running: 'running',
+  health: 'health:',
+  open: 'open',
+  openTitle: 'Open service in browser',
+  status: 'Status',
+  commits: 'Commits',
+  history: 'History',
+  config: 'Config',
+  deploying: 'Deploying...',
+  deployLatest: 'Deploy Latest',
+  branch: 'Branch:',
+  switch_: 'switch',
+  fetch: 'fetch',
+  clone: 'clone',
+  deployed: 'Deployed',
+  localHead: 'Local HEAD',
+  remoteHead: 'Remote HEAD',
+  branchLabel: 'Branch',
+  interval: 'Interval',
+  mode: 'Mode',
+  build: 'Build',
+  run: 'Run',
+  jvmArgs: 'JVM Args',
+  envVars: 'Env Vars',
+  none: 'none',
+  unknown: '?',
+  dash: '—',
+  log: 'log',
+  current: 'current',
+  rollback: 'rollback',
+  noDeployments: 'No deployments yet',
+  cached: 'cached',
+  ok: 'ok',
+  fail: 'fail',
+  buildLog: 'Build Log:',
+  noLog: '(no log)',
+  configTab: '.deployd/config.toml',
+  mavenSettings: 'Maven Settings',
+  viteConfig: 'Vite Config',
+  envVarsTab: 'Env Vars',
+  localRepo: 'Local Repo',
+  saveConfig: 'Save config',
+  saveSettings: 'Save settings',
+  saveViteConfig: 'Save vite.config.ts',
+  saveEnvVars: 'Save env vars',
+  saving: 'Saving...',
+  saved: 'Saved ✓',
+  noMavenConfigured: 'No maven_settings configured in config.toml',
+  notConfigured: 'Not configured',
+  jvmArgsPlaceholder: '-Xmx512m -Dserver.port=8080',
+  envVarsPlaceholder: 'JAVA_HOME=/usr/lib/jvm/java-17\nSPRING_PROFILES_ACTIVE=prod',
+  jvmArgsLabel: 'JVM Arguments',
+  envVarsLabel: 'Environment Variables (KEY=VALUE, one per line)',
+  localMavenRepo: 'Local Maven Repository',
+  copyPath: '📋 Copy path',
+  cloneName: 'New target name:',
+  cloneRepo: 'Repo path (blank = same repo):',
+  cloneFailed: 'Clone failed:',
+  configPath: '{repo}/.deployd/config.toml',
+  viteConfigPath: '{repo}/vite.config.ts',
+  errorPrefix: 'Error:',
+  seconds: 's',
+  processRunning: 'process running',
+  restartHint: 'Changes saved to config. They will take effect on next deploy.',
+};
+
+const zh: typeof en = {
+  building: '构建中:',
+  versionAvailable: 'v{version} 可用',
+  restartNow: '立即重启',
+  checking: '检查中...',
+  error: '错误',
+  updateTo: '更新到 v{version}',
+  upToDate: '已是最新',
+  update: '更新',
+  never: '从未',
+  selectTarget: '请选择一个目标',
+  loading: '加载中...',
+  running: '运行中',
+  health: '健康检查:',
+  open: '打开',
+  openTitle: '在浏览器中打开服务',
+  status: '状态',
+  commits: '提交',
+  history: '历史',
+  config: '配置',
+  deploying: '部署中...',
+  deployLatest: '部署最新',
+  branch: '分支:',
+  switch_: '切换',
+  fetch: '拉取',
+  clone: '克隆',
+  deployed: '已部署',
+  localHead: '本地 HEAD',
+  remoteHead: '远程 HEAD',
+  branchLabel: '分支',
+  interval: '轮询间隔',
+  mode: '模式',
+  build: '构建命令',
+  run: '运行命令',
+  jvmArgs: 'JVM 参数',
+  envVars: '环境变量',
+  none: '无',
+  unknown: '?',
+  dash: '—',
+  log: '日志',
+  current: '当前',
+  rollback: '回滚',
+  noDeployments: '暂无部署记录',
+  cached: '已缓存',
+  ok: '成功',
+  fail: '失败',
+  buildLog: '构建日志:',
+  noLog: '(无日志)',
+  configTab: '.deployd/config.toml',
+  mavenSettings: 'Maven 配置',
+  viteConfig: 'Vite 配置',
+  envVarsTab: '环境变量',
+  localRepo: '本地仓库',
+  saveConfig: '保存配置',
+  saveSettings: '保存配置',
+  saveViteConfig: '保存 vite.config.ts',
+  saveEnvVars: '保存环境变量',
+  saving: '保存中...',
+  saved: '已保存 ✓',
+  noMavenConfigured: 'config.toml 中未配置 maven_settings',
+  notConfigured: '未配置',
+  jvmArgsPlaceholder: '-Xmx512m -Dserver.port=8080',
+  envVarsPlaceholder: 'JAVA_HOME=/usr/lib/jvm/java-17\nSPRING_PROFILES_ACTIVE=prod',
+  jvmArgsLabel: 'JVM 参数',
+  envVarsLabel: '环境变量 (每行一个 KEY=VALUE)',
+  localMavenRepo: '本地 Maven 仓库',
+  copyPath: '📋 复制路径',
+  cloneName: '新目标名称:',
+  cloneRepo: '仓库路径 (留空则使用相同路径):',
+  cloneFailed: '克隆失败:',
+  configPath: '{repo}/.deployd/config.toml',
+  viteConfigPath: '{repo}/vite.config.ts',
+  errorPrefix: '错误:',
+  seconds: '秒',
+  processRunning: '进程运行中',
+  restartHint: '配置已保存，下次部署生效。',
+};
+
+const langs: Record<Lang, typeof en> = { en, zh };
+
+interface I18nContext {
+  lang: Lang;
+  t: typeof en;
+  setLang: (l: Lang) => void;
+}
+
+const ctx = createContext<I18nContext>({ lang: 'en', t: en, setLang: () => {} });
+
+export function I18nProvider({ children }: { children: ReactNode }) {
+  const [lang, setLang] = useState<Lang>('en');
+  const t = langs[lang];
+  return <ctx.Provider value={{ lang, t, setLang }}>{children}</ctx.Provider>;
+}
+
+export function useI18n() {
+  return useContext(ctx);
+}
+
+export function tf(template: string, vars: Record<string, string>): string {
+  let result = template;
+  for (const [k, v] of Object.entries(vars)) {
+    result = result.replace(`{${k}}`, v);
+  }
+  return result;
+}
