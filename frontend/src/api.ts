@@ -106,6 +106,21 @@ export async function switchBranch(name: string, branch: string): Promise<void> 
   });
 }
 
+export interface BranchesResponse {
+  branches: string[];
+  current: string;
+}
+
+export async function fetchBranches(name: string): Promise<BranchesResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/branches`);
+  return res.json();
+}
+
+export async function fetchTarget(name: string): Promise<{ status: string; remote_head: string }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/fetch`, { method: 'POST' });
+  return res.json();
+}
+
 export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();

@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
-  fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchQueue,
+  fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
+  fetchTarget as fetchTargetApi, fetchQueue,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
@@ -149,8 +150,10 @@ function TargetDetail({ name }: { name: string }) {
   const [log, setLog] = useState<string>('');
   const [logHash, setLogHash] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [branchInput, setBranchInput] = useState('');
+  const [branches, setBranches] = useState<string[]>([]);
+  const [branchSel, setBranchSel] = useState('');
   const [switchingBranch, setSwitchingBranch] = useState(false);
+  const [fetching, setFetching] = useState(false);
 
   const refresh = useCallback(async () => {
     const [s, c, h] = await Promise.all([
@@ -161,6 +164,7 @@ function TargetDetail({ name }: { name: string }) {
     setStatus(s);
     setCommits(c);
     setHistory(h);
+    if (s.branch && !branchSel) setBranchSel(s.branch);
   }, [name]);
 
   useEffect(() => {
@@ -168,6 +172,13 @@ function TargetDetail({ name }: { name: string }) {
     const timer = setInterval(refresh, REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    fetchBranches(name).then((b) => {
+      setBranches(b.branches);
+      setBranchSel(b.current);
+    });
+  }, [name]);
 
   const viewLog = async (hash: string) => {
     setLogHash(hash);
@@ -190,12 +201,18 @@ function TargetDetail({ name }: { name: string }) {
   };
 
   const handleSwitchBranch = async () => {
-    if (!branchInput.trim()) return;
+    if (!branchSel || branchSel === status?.branch) return;
     setSwitchingBranch(true);
-    await switchBranch(name, branchInput.trim());
-    setBranchInput('');
+    await switchBranch(name, branchSel);
     await refresh();
     setSwitchingBranch(false);
+  };
+
+  const handleFetch = async () => {
+    setFetching(true);
+    await fetchTargetApi(name);
+    await refresh();
+    setFetching(false);
   };
 
   if (!status) return <div style={s.empty}>Loading...</div>;
@@ -229,21 +246,30 @@ function TargetDetail({ name }: { name: string }) {
               {loading ? 'Deploying...' : 'Deploy Latest'}
             </button>
           </div>
-          <div style={{ ...s.card, marginBottom: '0.75rem' }}>
-            <span style={{ fontSize: '0.75rem', color: '#94a3b8', marginRight: '0.5rem' }}>Branch:</span>
-            <input
-              placeholder={status.branch}
-              value={branchInput}
-              onChange={(e) => setBranchInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSwitchBranch()}
-              style={s.branchInput}
-            />
+          <div style={{ ...s.card, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8', flexShrink: 0 }}>Branch:</span>
+            <select
+              value={branchSel}
+              onChange={(e) => setBranchSel(e.target.value)}
+              style={s.branchSelect}
+            >
+              {branches.length === 0 && (
+                <option value={status.branch}>{status.branch}</option>
+              )}
+              {branches.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
             <button
               onClick={handleSwitchBranch}
-              disabled={switchingBranch || !branchInput.trim()}
-              style={s.btnSwitch}
+              disabled={switchingBranch || !branchSel || branchSel === status.branch}
+              style={{ ...s.btnSwitch, ...(branchSel === status.branch ? s.btnDisabled : {}) }}
             >
               {switchingBranch ? '...' : 'switch'}
+            </button>
+            <div style={{ flex: 1 }} />
+            <button onClick={handleFetch} disabled={fetching} style={s.btnFetch}>
+              {fetching ? '...' : 'fetch'}
             </button>
           </div>
           <div style={s.card}>
@@ -364,8 +390,9 @@ const s: Record<string, React.CSSProperties> = {
   badgeCache: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#1e3a5f', color: '#7dd3fc' },
   empty: { color: '#64748b', padding: '2rem', textAlign: 'center' },
   log: { background: '#0f172a', padding: '1rem', borderRadius: 6, fontSize: '0.75rem', fontFamily: 'monospace', color: '#94a3b8', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto' },
-  branchInput: { padding: '0.3rem 0.5rem', border: '1px solid #334155', borderRadius: 4, background: '#0f172a', color: '#e2e8f0', fontSize: '0.8rem', width: 140, fontFamily: 'monospace' },
-  btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc' },
+  branchSelect: { padding: '0.3rem 0.5rem', border: '1px solid #334155', borderRadius: 4, background: '#0f172a', color: '#e2e8f0', fontSize: '0.8rem', fontFamily: 'monospace', maxWidth: 180 },
+  btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc', flexShrink: 0 },
+  btnFetch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#166534', color: '#4ade80', flexShrink: 0 },
 };
 
 export default App;

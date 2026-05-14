@@ -573,6 +573,67 @@ async fn target_set_branch(
     Ok(Json(serde_json::json!({"status": "ok", "branch": t.branch()})))
 }
 
+// ── Branch list ──
+
+#[derive(Serialize)]
+struct BranchesResponse {
+    branches: Vec<String>,
+    current: String,
+}
+
+/// GET /api/targets/{name}/branches
+async fn target_branches(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<BranchesResponse>, (StatusCode, String)> {
+    let t = s
+        .targets
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let output = std::process::Command::new("git")
+        .args(["branch", "-r"])
+        .current_dir(&t.repo)
+        .output()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let branches: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim().trim_start_matches(|c: char| c == '*' || c.is_whitespace()))
+        .filter(|b| !b.is_empty() && !b.contains("->"))
+        .map(|b| b.trim_start_matches("origin/").to_string())
+        .collect();
+
+    Ok(Json(BranchesResponse {
+        branches,
+        current: t.branch(),
+    }))
+}
+
+/// POST /api/targets/{name}/fetch
+async fn target_fetch(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let branch = t.branch();
+    let remote = git::remote_head(&t.repo, &t.remote, &branch)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    git::pull(&t.repo, &t.remote, &branch)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "remote_head": remote,
+    })))
+}
+
 // ── Config reload ──
 
 /// POST /api/reload — reload project configs and registry
@@ -696,6 +757,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/rollback", post(target_rollback))
         .route("/api/targets/{name}/deploy", post(target_deploy))
         .route("/api/targets/{name}/branch", post(target_set_branch))
+        .route("/api/targets/{name}/branches", get(target_branches))
+        .route("/api/targets/{name}/fetch", post(target_fetch))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
         .with_state(state)
