@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
-  fetchTarget as fetchTargetApi, cloneTarget, fetchQueue,
+  fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
