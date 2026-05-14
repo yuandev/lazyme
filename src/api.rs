@@ -871,6 +871,15 @@ async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
     })
 }
 
+// ── Version ──
+
+/// GET /api/version
+async fn version_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "version": crate::self_update::CURRENT_VERSION,
+    }))
+}
+
 // ── Self-update ──
 
 /// POST /api/self-update — check GitHub Releases, download, restart
@@ -906,7 +915,18 @@ async fn self_update_handler(
                     message: None,
                 });
 
-                match crate::self_update::update(&owner, &repo).await {
+                match crate::self_update::update_with_progress(&owner, &repo, {
+                    let tx = tx2.clone();
+                    move |downloaded, total| {
+                        let pct = if total > 0 { (downloaded * 100 / total) as u8 } else { 0 };
+                        let _ = tx.send(WsEvent {
+                            event: "self_update_progress".into(),
+                            target: String::new(),
+                            commit: None,
+                            message: Some(format!("{pct}")),
+                        });
+                    }
+                }).await {
                     Ok(new_version) => {
                         let _ = tx2.send(WsEvent {
                             event: "self_update_complete".into(),
@@ -1096,5 +1116,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
+        .route("/api/version", get(version_handler))
         .with_state(state)
 }
