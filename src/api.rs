@@ -32,7 +32,7 @@ pub struct TargetState {
     pub name: String,
     pub repo: PathBuf,
     pub remote: String,
-    pub branch: String,
+    pub branch: Mutex<String>,
     pub build_cmd: String,
     pub artifact: Option<PathBuf>,
     pub run_cmd: Option<String>,
@@ -40,6 +40,12 @@ pub struct TargetState {
     pub health_timeout: u64,
     pub state: Mutex<StateManager>,
     pub process: Mutex<Option<ManagedProcess>>,
+}
+
+impl TargetState {
+    pub fn branch(&self) -> String {
+        self.branch.lock().unwrap().clone()
+    }
 }
 
 // ── WebSocket event ──
@@ -155,14 +161,14 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
         .iter()
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
-            let running = t.process.lock().unwrap().is_some();
+            let running = t.process.lock().unwrap().as_mut().map_or(false, |p| p.is_running());
             TargetSummary {
                 name: t.name.clone(),
                 repo: t.repo.display().to_string(),
-                branch: t.branch.clone(),
+                branch: t.branch(),
                 deployed: st.current().clone(),
                 local_commit: git::local_head(&t.repo).ok(),
-                remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
+                remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch()).ok(),
                 process_running: running,
                 health_url: t.health_url.clone(),
             }
@@ -183,10 +189,10 @@ async fn target_status(
     Ok(Json(StatusResponse {
         name: t.name.clone(),
         repo: t.repo.display().to_string(),
-        branch: t.branch.clone(),
+        branch: t.branch(),
         deployed,
         local_commit: git::local_head(&t.repo).ok(),
-        remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch).ok(),
+        remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch()).ok(),
         interval_secs: s.interval,
         process_running: running,
         health_url: t.health_url.clone(),
@@ -280,8 +286,9 @@ async fn target_rollback(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !used_cache {
+        let branch = t.branch();
         build_and_cache(
-            &t.repo, &t.remote, &t.branch,
+            &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to,
             Some(&s.tx), &t.name,
@@ -316,10 +323,11 @@ async fn target_deploy(
         .get(&name)
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let remote = git::remote_head(&t.repo, &t.remote, &t.branch)
+    let branch = t.branch();
+    let remote = git::remote_head(&t.repo, &t.remote, &branch)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    git::pull(&t.repo, &t.remote, &t.branch)
+    git::pull(&t.repo, &t.remote, &branch)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let _ = s.tx.send(WsEvent {
@@ -334,7 +342,7 @@ async fn target_deploy(
     s.build_lock.set_current(Some(t.name.clone()));
 
     build_and_cache(
-        &t.repo, &t.remote, &t.branch,
+        &t.repo, &t.remote, &branch,
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
@@ -524,6 +532,82 @@ pub fn try_rollback_with_cache(
     }
 }
 
+// ── Branch switch ──
+
+#[derive(Deserialize)]
+struct BranchBody {
+    branch: String,
+}
+
+/// POST /api/targets/:name/branch
+async fn target_set_branch(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<BranchBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets
+        .get(&name)
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    let output = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{}", body.branch),
+        ])
+        .current_dir(&t.repo)
+        .output()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !output.status.success() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("branch '{}' not found in repo", body.branch),
+        ));
+    }
+
+    *t.branch.lock().unwrap() = body.branch;
+    Ok(Json(serde_json::json!({"status": "ok", "branch": t.branch()})))
+}
+
+// ── Config reload ──
+
+/// POST /api/reload — reload project configs and registry
+async fn reload_config(
+    State(s): State<SharedState>,
+) -> Json<serde_json::Value> {
+    let mut updated = 0u32;
+    let mut new_names: Vec<String> = Vec::new();
+
+    // Reload registry to discover new targets
+    if let Ok(registry) = crate::registry::load() {
+        let targets = crate::registry::filter(registry, &[]);
+        for entry in &targets {
+            if let Some(t) = s.targets.get(&entry.name) {
+                // Reload project config for existing target
+                if let Ok(Some(proj)) =
+                    crate::project::ProjectConfig::load(&entry.repo, entry.profile.as_deref())
+                {
+                    if let Some(b) = proj.watch.branch {
+                        *t.branch.lock().unwrap() = b;
+                        updated += 1;
+                    }
+                }
+            } else {
+                new_names.push(entry.name.clone());
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "branches_updated": updated,
+        "new_targets": new_names,
+        "hint": "restart to pick up new targets or build/run config changes"
+    }))
+}
+
 // ── Queue status ──
 
 #[derive(Serialize)]
@@ -551,5 +635,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/logs/{hash}", get(target_logs))
         .route("/api/targets/{name}/rollback", post(target_rollback))
         .route("/api/targets/{name}/deploy", post(target_deploy))
+        .route("/api/targets/{name}/branch", post(target_set_branch))
+        .route("/api/reload", post(reload_config))
         .with_state(state)
 }

@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_default()
             .unwrap_or_default();
 
-        let branch = proj.watch.branch.unwrap_or_else(|| "main".into());
+        let branch = Mutex::new(proj.watch.branch.unwrap_or_else(|| "main".into()));
         let build_cmd = proj.build.command.unwrap_or_else(|| "cargo build --release".into());
         let artifact = proj.build.artifact.map(std::path::PathBuf::from);
         let run_cmd = proj.run.command;
@@ -124,7 +124,9 @@ async fn poll_loop(
     loop {
         timer.tick().await;
 
-        let remote = match git::remote_head(&target.repo, &target.remote, &target.branch) {
+        let branch = target.branch();
+
+        let remote = match git::remote_head(&target.repo, &target.remote, &branch) {
             Ok(h) => h,
             Err(e) => {
                 warn!("[{}] remote check failed: {e}", target.name);
@@ -147,7 +149,7 @@ async fn poll_loop(
 
         info!("[{}] new commit: {remote}, pulling...", target.name);
 
-        if let Err(e) = git::pull(&target.repo, &target.remote, &target.branch) {
+        if let Err(e) = git::pull(&target.repo, &target.remote, &branch) {
             error!("[{}] pull failed: {e}", target.name);
             continue;
         }
@@ -159,7 +161,7 @@ async fn poll_loop(
         if let Err(e) = api::build_and_cache(
             &target.repo,
             &target.remote,
-            &target.branch,
+            &branch,
             &target.build_cmd,
             target.artifact.as_deref(),
             &remote,
