@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
-  fetchTargetLogs, deployTarget, rollbackTarget, fetchQueue,
+  fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchQueue,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 
@@ -149,6 +149,8 @@ function TargetDetail({ name }: { name: string }) {
   const [log, setLog] = useState<string>('');
   const [logHash, setLogHash] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [branchInput, setBranchInput] = useState('');
+  const [switchingBranch, setSwitchingBranch] = useState(false);
 
   const refresh = useCallback(async () => {
     const [s, c, h] = await Promise.all([
@@ -187,6 +189,15 @@ function TargetDetail({ name }: { name: string }) {
     setLoading(false);
   };
 
+  const handleSwitchBranch = async () => {
+    if (!branchInput.trim()) return;
+    setSwitchingBranch(true);
+    await switchBranch(name, branchInput.trim());
+    setBranchInput('');
+    await refresh();
+    setSwitchingBranch(false);
+  };
+
   if (!status) return <div style={s.empty}>Loading...</div>;
 
   return (
@@ -216,6 +227,23 @@ function TargetDetail({ name }: { name: string }) {
           <div style={s.actions}>
             <button onClick={handleDeploy} disabled={loading} style={s.btnPrimary}>
               {loading ? 'Deploying...' : 'Deploy Latest'}
+            </button>
+          </div>
+          <div style={{ ...s.card, marginBottom: '0.75rem' }}>
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8', marginRight: '0.5rem' }}>Branch:</span>
+            <input
+              placeholder={status.branch}
+              value={branchInput}
+              onChange={(e) => setBranchInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSwitchBranch()}
+              style={s.branchInput}
+            />
+            <button
+              onClick={handleSwitchBranch}
+              disabled={switchingBranch || !branchInput.trim()}
+              style={s.btnSwitch}
+            >
+              {switchingBranch ? '...' : 'switch'}
             </button>
           </div>
           <div style={s.card}>
@@ -336,6 +364,8 @@ const s: Record<string, React.CSSProperties> = {
   badgeCache: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#1e3a5f', color: '#7dd3fc' },
   empty: { color: '#64748b', padding: '2rem', textAlign: 'center' },
   log: { background: '#0f172a', padding: '1rem', borderRadius: 6, fontSize: '0.75rem', fontFamily: 'monospace', color: '#94a3b8', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto' },
+  branchInput: { padding: '0.3rem 0.5rem', border: '1px solid #334155', borderRadius: 4, background: '#0f172a', color: '#e2e8f0', fontSize: '0.8rem', width: 140, fontFamily: 'monospace' },
+  btnSwitch: { padding: '0.3rem 0.7rem', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: '0.75rem', background: '#1e3a5f', color: '#7dd3fc' },
 };
 
 export default App;

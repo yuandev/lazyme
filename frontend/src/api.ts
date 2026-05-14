@@ -98,6 +98,14 @@ export async function rollbackTarget(name: string, commit: string): Promise<void
   });
 }
 
+export async function switchBranch(name: string, branch: string): Promise<void> {
+  await fetch(`${API}/targets/${encodeURIComponent(name)}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ branch }),
+  });
+}
+
 export async function fetchQueue(): Promise<QueueResponse> {
   const res = await fetch(`${API}/queue`);
   return res.json();
