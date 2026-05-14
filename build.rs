@@ -27,7 +27,25 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".into());
 
+    // Detect version from git tag. Falls back to Cargo.toml version if no tags.
+    let version = Command::new("git")
+        .args(["describe", "--tags", "--exact-match"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+        .map(|s| s.trim().trim_start_matches('v').to_string())
+        .or_else(|| {
+            Command::new("git")
+                .args(["describe", "--tags"])
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None })
+                .map(|s| s.trim().trim_start_matches('v').to_string())
+        })
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+
     println!("cargo:rustc-env=GIT_COMMIT_HASH={hash}");
+    println!("cargo:rustc-env=GIT_VERSION={version}");
     println!("cargo:rustc-env=TARGET={}", std::env::var("TARGET").unwrap());
     println!("cargo:rerun-if-changed=frontend/src/");
     println!("cargo:rerun-if-changed=frontend/package.json");
