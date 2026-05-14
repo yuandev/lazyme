@@ -1,5 +1,7 @@
 # lazyme
 
+[中文文档](README.zh.md)
+
 Single-binary, multi-target deployment daemon for local test environments. Watches git branches, pulls on new commits, builds, caches artifacts, and manages running processes — all with a dark-themed React dashboard.
 
 ## How It Works
@@ -25,22 +27,28 @@ targets.toml        .deployd/config.toml
 
 - **Poll**: each target checks `git ls-remote` on an interval
 - **Pull**: fetches + checks out the remote branch when a new commit appears
-- **Build**: runs the build command, captures stdout → `.deployd/logs/{hash}.log`
+- **Build**: runs the build command, captures stdout → `.deployd/logs/{hash}.log` (skipped in dev mode)
 - **Cache**: copies the build artifact to `.deployd/artifacts/{short_hash}/`
-- **Run**: kills old process, spawns new one, resolves `{artifact}` placeholder
+- **Run**: kills old process, spawns new one, resolves `{artifact}` and `{jvm_args}` placeholders
 - **Health**: TCP-connects to the health URL, retries until timeout
 
 ## Quick Start
 
-### 1. Install
+### 1. Download
+
+Pre-built binaries from [GitHub Releases](https://github.com/yuandev/lazyme/releases). Choose your platform:
+
+- `deployd-x86_64-unknown-linux-gnu` — Linux x86_64
+- `deployd-aarch64-apple-darwin` — macOS Apple Silicon
 
 ```bash
-git clone git@github.com:yuandev/lazyme.git
-cd lazyme
-cargo build --release
+# Example: macOS
+curl -L -o deployd https://github.com/yuandev/lazyme/releases/latest/download/deployd-aarch64-apple-darwin
+chmod +x deployd
+./deployd
 ```
 
-Requires Rust ≥ 1.82 and Node.js (for frontend; pre-built `dist/` is embedded for release).
+No dependencies needed — the frontend is embedded in the binary.
 
 ### 2. Register targets
 
@@ -63,34 +71,42 @@ In each repo, create `.deployd/config.toml`:
 
 ```toml
 [watch]
-branch = "main"          # default: main
+branch = "main"
 
 [build]
-command = "cargo build --release"
-artifact = "target/release/my-api"   # relative to repo root
+command = "mvn package -DskipTests"
+artifact = "target/my-api.jar"
+maven_settings = "/path/to/settings.xml"   # optional
+local_repo = "/path/to/maven/repo"         # optional
 
 [run]
-command = "./target/release/{artifact}"   # {artifact} replaced at runtime
-health_url = "http://localhost:3000/health"
-health_timeout = 30    # seconds, default 30
+mode = "deploy"              # "deploy" (default) or "dev" (skip build)
+command = "java {jvm_args} -jar {artifact}"
+jvm_args = "-Xmx512m -Dserver.port=8080"
+health_url = "http://localhost:8080/health"
+health_timeout = 30
+
+[env]
+JAVA_HOME = "/usr/lib/jvm/java-17"
+SPRING_PROFILES_ACTIVE = "prod"
 ```
 
-All fields are optional. CLI flags override project config, project config overrides built-in defaults.
+All fields are optional. CLI args override project config, project config overrides built-in defaults.
 
 ### 4. Run
 
 ```bash
 # Watch all targets
-lazyme
+./deployd
 
 # Watch specific targets
-lazyme my-api frontend
+./deployd my-api frontend
 
 # Custom port and poll interval
-lazyme --port 9090 --interval 30
+./deployd --port 9090 --interval 30
 
 # Custom remote name
-lazyme --remote upstream
+./deployd --remote upstream
 ```
 
 Open **http://localhost:8080** for the dashboard.
@@ -107,27 +123,46 @@ Options:
   <FILTER>...              Target names to watch (empty = all)
 ```
 
+## Features
+
+### Web Dashboard
+
+- **Status tab**: live view of deployed commit, git state, build/run commands, JVM args, env vars
+- **Commits tab**: recent commits with rollback and log viewer
+- **History tab**: deployment history with cache status
+- **Config tab**: edit `.deployd/config.toml`, Maven settings, `vite.config.ts`, JVM args and env vars
+- **Branch switch**: dropdown with all remote branches, persists to config
+- **Clone target**: duplicate a target with custom repo path for independent deploys
+- **Open service**: launch the deployed service URL in browser
+- **i18n**: English / Chinese toggle
+
+### Self-Update
+
+- Check for new GitHub Releases from the dashboard header
+- Streaming download with progress bar
+- Manual restart after download (won't kill the UI mid-update)
+
+### Dev Mode
+
+Set `mode = "dev"` in `[run]` to skip the build step. On new commits, lazyme pulls and restarts the run command directly — ideal for Node.js, Python, or any interpreted language.
+
 ## Configuration Files
 
 ### `~/.config/lazyme/targets.toml` (required)
 
-Multi-target registry. Each `[[targets]]` entry declares a target to watch.
-
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Unique target name (used in UI and API) |
+| `name` | yes | Unique target name |
 | `repo` | yes | Absolute path to local git repository |
-| `profile` | no | Load `.deployd/config.{profile}.toml` instead of `config.toml` |
+| `profile` | no | Load `.deployd/config.{profile}.toml` |
 
 ### `.deployd/config.toml` (per-repo, optional)
-
-Project-owned build/run configuration. Convention over configuration.
 
 #### `[watch]`
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `branch` | `main` | Branch to watch for new commits |
+| `branch` | `main` | Branch to watch |
 
 #### `[build]`
 
@@ -135,27 +170,33 @@ Project-owned build/run configuration. Convention over configuration.
 |-------|---------|-------------|
 | `command` | `cargo build --release` | Shell command to build |
 | `artifact` | none | Path to built artifact (relative to repo root) |
+| `maven_settings` | none | Path to Maven settings.xml |
+| `local_repo` | none | Path to local Maven repository |
 
 #### `[run]`
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `command` | none | Shell command to start the service. `{artifact}` is replaced with the actual artifact path |
-| `health_url` | none | Health check endpoint (e.g. `http://localhost:3000/health`) |
-| `health_timeout` | `30` | Seconds to wait for health check to pass |
+| `mode` | `deploy` | `"deploy"` (build + run) or `"dev"` (run only) |
+| `command` | none | Shell command. `{artifact}` and `{jvm_args}` are replaced at runtime |
+| `jvm_args` | none | JVM arguments |
+| `health_url` | none | Health check endpoint |
+| `health_timeout` | `30` | Seconds to wait for health check |
+
+#### `[env]`
+
+Flat key-value pairs injected as environment variables into the run command process.
 
 ## On-Disk Layout
-
-Each watched repository accumulates state under `.deployd/`:
 
 ```
 my-project/
 └── .deployd/
-    ├── config.toml          # project config (you create this)
+    ├── config.toml          # project config
     ├── state.json           # deploy history (auto-managed)
     ├── artifacts/
     │   └── a1b2c3d/
-    │       └── my-binary    # cached build artifact
+    │       └── my-binary    # cached artifact
     └── logs/
         └── a1b2c3d.log      # build output
 ```
@@ -164,15 +205,26 @@ my-project/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/ws` | WebSocket — real-time build/deploy events |
-| `GET` | `/api/targets` | List all targets with status summary |
-| `GET` | `/api/targets/{name}/status` | Detailed target status |
-| `GET` | `/api/targets/{name}/commits` | Recent git commits |
-| `GET` | `/api/targets/{name}/history` | Deploy history (with cache/log links) |
-| `GET` | `/api/targets/{name}/logs/{hash}` | Build log content |
-| `POST` | `/api/targets/{name}/deploy` | Trigger manual deploy |
-| `POST` | `/api/targets/{name}/rollback` | Rollback to a commit (uses cache if available) |
-| `GET` | `/api/queue` | Current build status |
+| `GET` | `/ws` | WebSocket events |
+| `GET` | `/api/targets` | List all targets |
+| `GET` | `/api/targets/{name}/status` | Target status |
+| `GET` | `/api/targets/{name}/commits` | Recent commits |
+| `GET` | `/api/targets/{name}/history` | Deploy history |
+| `GET` | `/api/targets/{name}/logs/{hash}` | Build log |
+| `POST` | `/api/targets/{name}/deploy` | Manual deploy |
+| `POST` | `/api/targets/{name}/rollback` | Rollback to commit |
+| `GET` | `/api/targets/{name}/branches` | List remote branches |
+| `POST` | `/api/targets/{name}/branch` | Switch branch |
+| `POST` | `/api/targets/{name}/fetch` | Git fetch + pull |
+| `POST` | `/api/targets/{name}/clone` | Clone target |
+| `GET/PUT` | `/api/targets/{name}/config` | Read/write config.toml |
+| `GET/PUT` | `/api/targets/{name}/vite-config` | Read/write vite.config.ts |
+| `GET/PUT` | `/api/targets/{name}/env` | Read/write JVM args + env vars |
+| `POST` | `/api/self-update` | Check + download update |
+| `POST` | `/api/restart` | Restart server |
+| `GET` | `/api/version` | Current version |
+| `GET` | `/api/queue` | Build queue status |
+| `POST` | `/api/reload` | Reload configs |
 
 ### WebSocket Events
 
@@ -181,33 +233,25 @@ my-project/
 {"event":"build_complete","target":"my-api","commit":"a1b2c3d","message":"success=true"}
 {"event":"deploy_started","target":"my-api","commit":"a1b2c3d","message":null}
 {"event":"deploy_complete","target":"my-api","commit":"a1b2c3d","message":null}
+{"event":"self_update_checking","target":"","commit":null,"message":null}
+{"event":"self_update_progress","target":"","commit":null,"message":"45"}
+{"event":"self_update_complete","target":"","commit":"0.1.5","message":null}
+{"event":"targets_changed","target":"my-clone","commit":null,"message":null}
 ```
-
-## Rollback
-
-Rollback is instant when the target artifact was cached. If the cached artifact for the requested commit exists, it restarts the process immediately. Otherwise it rebuilds from that commit.
-
-```bash
-# Via API
-curl -X POST http://localhost:8080/api/targets/my-api/rollback \
-  -H 'Content-Type: application/json' \
-  -d '{"commit":"a1b2c3d4"}'
-```
-
-Or click "rollback" in the dashboard commit list.
 
 ## Build from Source
 
 ```bash
-# Backend
+git clone git@github.com:yuandev/lazyme.git
+cd lazyme
+
+# Backend (requires Rust ≥ 1.82)
 cargo build --release
 
-# Frontend (only if you modified it)
+# Frontend (only if you modified it; pre-built dist/ is committed)
 cd frontend
 npm install
 npm run build
-
-# The Rust binary embeds frontend/dist/ at compile time
 ```
 
 ## License

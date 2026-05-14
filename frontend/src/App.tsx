@@ -8,6 +8,7 @@ import {
   restartServer,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
+import { I18nProvider, useI18n, tf } from './i18n';
 
 const REFRESH_MS = 8_000;
 
@@ -15,11 +16,12 @@ type UpdatePhase = null | 'checking' | 'downloading' | 'complete' | 'error';
 interface UpdateState {
   phase: UpdatePhase;
   version: string | null;
-  progress: number; // 0-100
+  progress: number;
   error: string | null;
 }
 
-function App() {
+function AppInner() {
+  const { t, lang, setLang } = useI18n();
   const [targets, setTargets] = useState<TargetSummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [building, setBuilding] = useState<string | null>(null);
@@ -41,7 +43,6 @@ function App() {
     return () => clearInterval(timer);
   }, [refreshTargets]);
 
-  // WebSocket connection
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -73,13 +74,10 @@ function App() {
             if (data.event?.startsWith('self_update_')) break;
             refreshTargets();
         }
-      } catch {
-        // ignore malformed messages
-      }
+      } catch { /* ignore */ }
     };
 
     ws.onclose = () => { wsRef.current = null; };
-
     return () => { ws.close(); };
   }, [refreshTargets]);
 
@@ -92,19 +90,23 @@ function App() {
     } else if (data.status === 'error') {
       setUpdate({ phase: 'error', version: null, progress: 0, error: data.message });
     }
-    // 'updating' — WS events will drive the UI
   };
+
+  const toggleLang = () => setLang(lang === 'en' ? 'zh' : 'en');
 
   return (
     <div style={s.container}>
       <header style={s.header}>
         <h1 style={s.title}>deployd</h1>
         <span style={s.versionTag}>v{currentVersion}</span>
-        {building && <span style={s.buildingBadge}>building: {building}</span>}
+        {building && <span style={s.buildingBadge}>{t.building} {building}</span>}
         {update.version && !update.phase && (
-          <span style={s.updateHint}>v{update.version} available</span>
+          <span style={s.updateHint}>{tf(t.versionAvailable, { version: update.version })}</span>
         )}
         <div style={{ flex: 1 }} />
+        <button onClick={toggleLang} style={s.langBtn} title="Switch language">
+          {lang === 'en' ? '中' : 'EN'}
+        </button>
         {update.phase === 'downloading' ? (
           <div style={s.updateBtn}>
             <div style={{ ...s.progressBar, width: `${update.progress}%` }} />
@@ -112,7 +114,7 @@ function App() {
           </div>
         ) : update.phase === 'complete' ? (
           <button onClick={restartServer} style={{ ...s.headerBtn, ...s.updateOk }}>
-            restart now
+            {t.restartNow}
           </button>
         ) : (
           <button
@@ -124,27 +126,27 @@ function App() {
               ...(update.error === 'Already up to date' ? s.updateOk : {}),
             }}
           >
-            {update.phase === 'checking' ? 'checking...' :
-             update.phase === 'error' ? 'error' :
-             update.version ? `update to v${update.version}` :
-             update.error ? 'up to date' : 'update'}
+            {update.phase === 'checking' ? t.checking :
+             update.phase === 'error' ? t.error :
+             update.version ? tf(t.updateTo, { version: update.version }) :
+             update.error ? t.upToDate : t.update}
           </button>
         )}
       </header>
       <div style={s.body}>
         <aside style={s.sidebar}>
-          {targets.map((t) => (
+          {targets.map((target) => (
             <button
-              key={t.name}
-              onClick={() => setSelected(t.name)}
-              style={{ ...s.targetCard, ...(selected === t.name ? s.targetCardActive : {}) }}
+              key={target.name}
+              onClick={() => setSelected(target.name)}
+              style={{ ...s.targetCard, ...(selected === target.name ? s.targetCardActive : {}) }}
             >
               <div style={s.cardName}>
-                {t.process_running && <span style={s.dot} />}
-                {t.name}
+                {target.process_running && <span style={s.dot} />}
+                {target.name}
               </div>
               <div style={s.cardMeta}>
-                {t.branch} &middot; {t.deployed?.short_hash ?? 'never'}
+                {target.branch} &middot; {target.deployed?.short_hash ?? t.never}
               </div>
             </button>
           ))}
@@ -153,7 +155,7 @@ function App() {
           {selected ? (
             <TargetDetail name={selected} />
           ) : (
-            <div style={s.empty}>Select a target</div>
+            <div style={s.empty}>{t.selectTarget}</div>
           )}
         </main>
       </div>
@@ -162,6 +164,7 @@ function App() {
 }
 
 function TargetDetail({ name }: { name: string }) {
+  const { t } = useI18n();
   const [tab, setTab] = useState<'status' | 'commits' | 'history' | 'config'>('status');
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [commits, setCommits] = useState<CommitInfo[]>([]);
@@ -203,7 +206,7 @@ function TargetDetail({ name }: { name: string }) {
   const viewLog = async (hash: string) => {
     setLogHash(hash);
     const content = await fetchTargetLogs(name, hash);
-    setLog(content || '(no log)');
+    setLog(content || t.noLog);
   };
 
   const handleDeploy = async () => {
@@ -236,20 +239,27 @@ function TargetDetail({ name }: { name: string }) {
   };
 
   const handleClone = async () => {
-    const newName = prompt('New target name:', `${name}-clone`);
+    const newName = prompt(t.cloneName, `${name}-clone`);
     if (!newName) return;
-    const newRepo = prompt('Repo path (blank = same repo):', status?.repo ?? '');
-    if (newRepo === null) return; // cancelled
+    const newRepo = prompt(t.cloneRepo, status?.repo ?? '');
+    if (newRepo === null) return;
     setCloning(true);
     try {
       await cloneTarget(name, newName, newRepo.trim() || undefined);
     } catch (e: any) {
-      alert(`Clone failed: ${e.message || e}`);
+      alert(`${t.cloneFailed} ${e.message || e}`);
     }
     setCloning(false);
   };
 
-  if (!status) return <div style={s.empty}>Loading...</div>;
+  if (!status) return <div style={s.empty}>{t.loading}</div>;
+
+  const tabLabels: Record<string, string> = {
+    status: t.status,
+    commits: t.commits,
+    history: t.history,
+    config: t.config,
+  };
 
   return (
     <div>
@@ -257,10 +267,10 @@ function TargetDetail({ name }: { name: string }) {
         <h2 style={s.detailName}>{status.name}</h2>
         <span style={s.detailRepo}>{status.repo}</span>
         <span style={s.detailBranch}>@{status.branch}</span>
-        {status.process_running && <span style={s.badgeGreen}>running</span>}
+        {status.process_running && <span style={s.badgeGreen}>{t.running}</span>}
         {status.health_url && (
           <>
-            <span style={s.badgeCache}>health: {status.health_url}</span>
+            <span style={s.badgeCache}>{t.health} {status.health_url}</span>
             <button
               onClick={() => {
                 try {
@@ -268,9 +278,9 @@ function TargetDetail({ name }: { name: string }) {
                   window.open(u.origin, '_blank');
                 } catch { /* invalid url */ }
               }}
-              title="Open service in browser"
+              title={t.openTitle}
               style={s.btnOpen}
-            >open</button>
+            >{t.open}</button>
           </>
         )}
         {status.run_cmd && (
@@ -279,13 +289,13 @@ function TargetDetail({ name }: { name: string }) {
       </div>
 
       <div style={s.tabs}>
-        {(['status', 'commits', 'history', 'config'] as const).map((t) => (
+        {(['status', 'commits', 'history', 'config'] as const).map((tabKey) => (
           <button
-            key={t}
-            onClick={() => setTab(t)}
-            style={{ ...s.tab, ...(tab === t ? s.tabActive : {}) }}
+            key={tabKey}
+            onClick={() => setTab(tabKey)}
+            style={{ ...s.tab, ...(tab === tabKey ? s.tabActive : {}) }}
           >
-            {t === 'status' ? 'Status' : t === 'commits' ? 'Commits' : t === 'history' ? 'History' : 'Config'}
+            {tabLabels[tabKey]}
           </button>
         ))}
       </div>
@@ -294,11 +304,11 @@ function TargetDetail({ name }: { name: string }) {
         <div>
           <div style={s.actions}>
             <button onClick={handleDeploy} disabled={loading} style={s.btnPrimary}>
-              {loading ? 'Deploying...' : 'Deploy Latest'}
+              {loading ? t.deploying : t.deployLatest}
             </button>
           </div>
           <div style={{ ...s.card, marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <span style={{ fontSize: '0.75rem', color: '#94a3b8', flexShrink: 0 }}>Branch:</span>
+            <span style={{ fontSize: '0.75rem', color: '#94a3b8', flexShrink: 0 }}>{t.branch}</span>
             <select
               value={branchSel}
               onChange={(e) => setBranchSel(e.target.value)}
@@ -316,28 +326,28 @@ function TargetDetail({ name }: { name: string }) {
               disabled={switchingBranch || !branchSel || branchSel === status.branch}
               style={{ ...s.btnSwitch, ...(branchSel === status.branch ? s.btnDisabled : {}) }}
             >
-              {switchingBranch ? '...' : 'switch'}
+              {switchingBranch ? '...' : t.switch_}
             </button>
             <div style={{ flex: 1 }} />
             <button onClick={handleFetch} disabled={fetching} style={s.btnFetch}>
-              {fetching ? '...' : 'fetch'}
+              {fetching ? '...' : t.fetch}
             </button>
             <button onClick={handleClone} disabled={cloning} style={s.btnClone}>
-              clone
+              {t.clone}
             </button>
           </div>
           <div style={s.card}>
             <div style={s.grid}>
-              <Item label="Deployed" value={status.deployed?.commit_hash?.substring(0, 7) ?? 'none'} />
-              <Item label="Local HEAD" value={status.local_commit?.substring(0, 7) ?? '?'} />
-              <Item label="Remote HEAD" value={status.remote_commit?.substring(0, 7) ?? '?'} />
-              <Item label="Branch" value={status.branch} />
-              <Item label="Interval" value={`${status.interval_secs}s`} />
-              <Item label="Mode" value={status.run_mode} />
-              <Item label="Build" value={status.build_cmd} />
-              <Item label="Run" value={status.run_cmd ?? '—'} />
-              <Item label="JVM Args" value={status.jvm_args ?? '—'} />
-              <Item label="Env Vars" value={Object.keys(status.envs).length > 0 ? Object.keys(status.envs).join(', ') : '—'} />
+              <Item label={t.deployed} value={status.deployed?.commit_hash?.substring(0, 7) ?? t.none} />
+              <Item label={t.localHead} value={status.local_commit?.substring(0, 7) ?? t.unknown} />
+              <Item label={t.remoteHead} value={status.remote_commit?.substring(0, 7) ?? t.unknown} />
+              <Item label={t.branchLabel} value={status.branch} />
+              <Item label={t.interval} value={`${status.interval_secs}${t.seconds}`} />
+              <Item label={t.mode} value={status.run_mode} />
+              <Item label={t.build} value={status.build_cmd} />
+              <Item label={t.run} value={status.run_cmd ?? t.dash} />
+              <Item label={t.jvmArgs} value={status.jvm_args ?? t.dash} />
+              <Item label={t.envVars} value={Object.keys(status.envs).length > 0 ? Object.keys(status.envs).join(', ') : t.dash} />
             </div>
           </div>
         </div>
@@ -351,16 +361,13 @@ function TargetDetail({ name }: { name: string }) {
               <div key={c.hash} style={s.listItem}>
                 <code style={s.hash}>{c.short_hash}</code>
                 <span style={s.msg}>{c.message}</span>
-                <button
-                  onClick={() => viewLog(c.hash)}
-                  style={s.btnLog}
-                >log</button>
+                <button onClick={() => viewLog(c.hash)} style={s.btnLog}>{t.log}</button>
                 <button
                   onClick={() => handleRollback(c.hash)}
                   disabled={isDeployed || loading}
                   style={{ ...s.btnRollback, ...(isDeployed ? s.btnDisabled : {}) }}
                 >
-                  {isDeployed ? 'current' : 'rollback'}
+                  {isDeployed ? t.current : t.rollback}
                 </button>
               </div>
             );
@@ -371,18 +378,18 @@ function TargetDetail({ name }: { name: string }) {
       {tab === 'history' && (
         <div style={s.card}>
           {[...history].reverse().length === 0 ? (
-            <div style={s.empty}>No deployments yet</div>
+            <div style={s.empty}>{t.noDeployments}</div>
           ) : (
             [...history].reverse().map((h, i) => (
               <div key={i} style={s.listItem}>
                 <code style={s.hash}>{h.short_hash}</code>
                 <span style={s.msg}>{new Date(h.deployed_at).toLocaleString()}</span>
-                {h.cache_path && <span style={s.badgeCache}>cached</span>}
+                {h.cache_path && <span style={s.badgeCache}>{t.cached}</span>}
                 {h.log_path && (
-                  <button onClick={() => viewLog(h.short_hash)} style={s.btnLog}>log</button>
+                  <button onClick={() => viewLog(h.short_hash)} style={s.btnLog}>{t.log}</button>
                 )}
                 <span style={h.success ? s.badgeGreen : s.badgeYellow}>
-                  {h.success ? 'ok' : 'fail'}
+                  {h.success ? t.ok : t.fail}
                 </span>
               </div>
             ))
@@ -396,7 +403,7 @@ function TargetDetail({ name }: { name: string }) {
 
       {logHash && (
         <div style={s.card}>
-          <h3 style={s.cardTitle}>Build Log: {logHash}</h3>
+          <h3 style={s.cardTitle}>{t.buildLog} {logHash}</h3>
           <pre style={s.log}>{log}</pre>
         </div>
       )}
@@ -405,6 +412,7 @@ function TargetDetail({ name }: { name: string }) {
 }
 
 function ConfigEditor({ name }: { name: string }) {
+  const { t } = useI18n();
   const [config, setConfig] = useState('');
   const [configPath, setConfigPath] = useState('');
   const [mavenSettings, setMavenSettings] = useState('');
@@ -436,9 +444,7 @@ function ConfigEditor({ name }: { name: string }) {
       setJvmArgs(env.jvm_args ?? '');
       setEnvsText(Object.entries(env.envs).map(([k, v]) => `${k}=${v}`).join('\n'));
       setLocalRepo(lr.local_repo);
-    } catch {
-      // config may not exist yet
-    }
+    } catch { /* config may not exist yet */ }
   }, [name]);
 
   useEffect(() => { load(); }, [load]);
@@ -448,9 +454,9 @@ function ConfigEditor({ name }: { name: string }) {
     setStatusMsg('');
     try {
       await fn();
-      setStatusMsg('Saved ✓');
+      setStatusMsg(t.saved);
     } catch (e: any) {
-      setStatusMsg(`Error: ${e.message || e}`);
+      setStatusMsg(`${t.errorPrefix} ${e.message || e}`);
     }
     setSaving(false);
   };
@@ -461,35 +467,26 @@ function ConfigEditor({ name }: { name: string }) {
     btn: { ...s.btnPrimary, padding: '0.4rem 0.9rem', fontSize: '0.8rem' },
     subTab: (tab: string) => ({ ...s.tab, ...(subTab === tab ? s.tabActive : {}) }),
     pathLabel: { fontSize: '0.7rem', color: '#64748b', marginBottom: '0.5rem', fontFamily: 'monospace' },
-    status: { fontSize: '0.8rem', color: statusMsg.startsWith('Error') ? '#fca5a5' : '#4ade80', marginLeft: '0.75rem' },
+    status: { fontSize: '0.8rem', color: statusMsg.startsWith(t.errorPrefix) ? '#fca5a5' : '#4ade80', marginLeft: '0.75rem' },
   };
 
   return (
     <div>
       <div style={{ ...s.tabs, marginBottom: '0.75rem' }}>
-        <button onClick={() => setSubTab('config')} style={styles.subTab('config')}>.deployd/config.toml</button>
-        <button onClick={() => setSubTab('maven')} style={styles.subTab('maven')}>Maven Settings</button>
-        <button onClick={() => setSubTab('vite')} style={styles.subTab('vite')}>Vite Config</button>
-        <button onClick={() => setSubTab('env')} style={styles.subTab('env')}>Env Vars</button>
-        <button onClick={() => setSubTab('repo')} style={styles.subTab('repo')}>Local Repo</button>
+        <button onClick={() => setSubTab('config')} style={styles.subTab('config')}>{t.configTab}</button>
+        <button onClick={() => setSubTab('maven')} style={styles.subTab('maven')}>{t.mavenSettings}</button>
+        <button onClick={() => setSubTab('vite')} style={styles.subTab('vite')}>{t.viteConfig}</button>
+        <button onClick={() => setSubTab('env')} style={styles.subTab('env')}>{t.envVarsTab}</button>
+        <button onClick={() => setSubTab('repo')} style={styles.subTab('repo')}>{t.localRepo}</button>
       </div>
 
       {subTab === 'config' && (
         <div style={s.card}>
-          <div style={styles.pathLabel}>{configPath || '~/.deployd/config.toml'}</div>
-          <textarea
-            value={config}
-            onChange={(e) => setConfig(e.target.value)}
-            style={styles.textarea}
-            spellCheck={false}
-          />
+          <div style={styles.pathLabel}>{configPath || t.configPath}</div>
+          <textarea value={config} onChange={(e) => setConfig(e.target.value)} style={styles.textarea} spellCheck={false} />
           <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <button
-              onClick={() => save(async () => { await saveConfig(name, config); })}
-              disabled={saving}
-              style={styles.btn}
-            >
-              {saving ? 'Saving...' : 'Save config'}
+            <button onClick={() => save(async () => { await saveConfig(name, config); })} disabled={saving} style={styles.btn}>
+              {saving ? t.saving : t.saveConfig}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>
@@ -498,20 +495,15 @@ function ConfigEditor({ name }: { name: string }) {
 
       {subTab === 'maven' && (
         <div style={s.card}>
-          <div style={styles.pathLabel}>{mavenSettingsPath || 'No maven_settings configured in config.toml'}</div>
-          <textarea
-            value={mavenSettings}
-            onChange={(e) => setMavenSettings(e.target.value)}
-            style={{ ...styles.textarea, minHeight: 400 }}
-            spellCheck={false}
-          />
+          <div style={styles.pathLabel}>{mavenSettingsPath || t.noMavenConfigured}</div>
+          <textarea value={mavenSettings} onChange={(e) => setMavenSettings(e.target.value)} style={{ ...styles.textarea, minHeight: 400 }} spellCheck={false} />
           <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <button
               onClick={() => save(async () => { await saveMavenSettings(name, mavenSettings); })}
               disabled={saving || !mavenSettingsPath}
               style={{ ...styles.btn, ...(!mavenSettingsPath ? s.btnDisabled : {}) }}
             >
-              {saving ? 'Saving...' : 'Save settings'}
+              {saving ? t.saving : t.saveSettings}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>
@@ -520,20 +512,11 @@ function ConfigEditor({ name }: { name: string }) {
 
       {subTab === 'vite' && (
         <div style={s.card}>
-          <div style={styles.pathLabel}>{viteConfigPath || '{repo}/vite.config.ts'}</div>
-          <textarea
-            value={viteConfig}
-            onChange={(e) => setViteConfig(e.target.value)}
-            style={{ ...styles.textarea, minHeight: 300 }}
-            spellCheck={false}
-          />
+          <div style={styles.pathLabel}>{viteConfigPath || t.viteConfigPath}</div>
+          <textarea value={viteConfig} onChange={(e) => setViteConfig(e.target.value)} style={{ ...styles.textarea, minHeight: 300 }} spellCheck={false} />
           <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-            <button
-              onClick={() => save(async () => { await saveViteConfig(name, viteConfig); })}
-              disabled={saving}
-              style={styles.btn}
-            >
-              {saving ? 'Saving...' : 'Save vite.config.ts'}
+            <button onClick={() => save(async () => { await saveViteConfig(name, viteConfig); })} disabled={saving} style={styles.btn}>
+              {saving ? t.saving : t.saveViteConfig}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>
@@ -543,23 +526,12 @@ function ConfigEditor({ name }: { name: string }) {
       {subTab === 'env' && (
         <div style={s.card}>
           <div style={{ marginBottom: '1rem' }}>
-            <div style={s.label}>JVM Arguments</div>
-            <input
-              value={jvmArgs}
-              onChange={(e) => setJvmArgs(e.target.value)}
-              style={styles.input}
-              placeholder="-Xmx512m -Dserver.port=8080"
-            />
+            <div style={s.label}>{t.jvmArgsLabel}</div>
+            <input value={jvmArgs} onChange={(e) => setJvmArgs(e.target.value)} style={styles.input} placeholder={t.jvmArgsPlaceholder} />
           </div>
           <div style={{ marginBottom: '1rem' }}>
-            <div style={s.label}>Environment Variables (KEY=VALUE, one per line)</div>
-            <textarea
-              value={envsText}
-              onChange={(e) => setEnvsText(e.target.value)}
-              style={{ ...styles.textarea, minHeight: 150 }}
-              placeholder="JAVA_HOME=/usr/lib/jvm/java-17&#10;SPRING_PROFILES_ACTIVE=prod"
-              spellCheck={false}
-            />
+            <div style={s.label}>{t.envVarsLabel}</div>
+            <textarea value={envsText} onChange={(e) => setEnvsText(e.target.value)} style={{ ...styles.textarea, minHeight: 150 }} placeholder={t.envVarsPlaceholder} spellCheck={false} />
           </div>
           <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <button
@@ -574,7 +546,7 @@ function ConfigEditor({ name }: { name: string }) {
               disabled={saving}
               style={styles.btn}
             >
-              {saving ? 'Saving...' : 'Save env vars'}
+              {saving ? t.saving : t.saveEnvVars}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>
@@ -585,20 +557,16 @@ function ConfigEditor({ name }: { name: string }) {
         <div style={s.card}>
           <div style={s.grid}>
             <div style={s.itemWrap}>
-              <span style={s.label}>Local Maven Repository</span>
+              <span style={s.label}>{t.localMavenRepo}</span>
               <span style={{ ...s.value, fontFamily: 'monospace', fontSize: '0.8rem', color: '#38bdf8' }}>
-                {localRepo || 'Not configured'}
+                {localRepo || t.notConfigured}
               </span>
             </div>
           </div>
           {localRepo && (
             <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#64748b' }}>
-              <a
-                href={`#`}
-                onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(localRepo); }}
-                style={{ color: '#7dd3fc', textDecoration: 'none' }}
-              >
-                📋 Copy path
+              <a href={`#`} onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(localRepo); }} style={{ color: '#7dd3fc', textDecoration: 'none' }}>
+                {t.copyPath}
               </a>
             </div>
           )}
@@ -617,6 +585,14 @@ function Item({ label, value }: { label: string; value: string }) {
   );
 }
 
+function App() {
+  return (
+    <I18nProvider>
+      <AppInner />
+    </I18nProvider>
+  );
+}
+
 const s: Record<string, React.CSSProperties> = {
   container: { minHeight: '100vh', background: '#0f172a', color: '#e2e8f0', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' },
   header: { padding: '1rem 2rem', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', gap: '1rem' },
@@ -625,6 +601,7 @@ const s: Record<string, React.CSSProperties> = {
   versionTag: { fontSize: '0.7rem', color: '#64748b', fontFamily: 'monospace', background: '#1e293b', padding: '0.15rem 0.4rem', borderRadius: 4 },
   updateHint: { fontSize: '0.7rem', color: '#facc15', fontFamily: 'monospace' },
   headerBtn: { padding: '0.3rem 0.8rem', border: '1px solid #334155', borderRadius: 6, cursor: 'pointer', fontSize: '0.75rem', background: '#1e293b', color: '#94a3b8' },
+  langBtn: { padding: '0.2rem 0.5rem', border: '1px solid #334155', borderRadius: 4, cursor: 'pointer', fontSize: '0.7rem', background: '#1e293b', color: '#94a3b8', fontFamily: 'monospace' },
   updateBtn: { position: 'relative', width: 120, height: 26, background: '#1e293b', border: '1px solid #334155', borderRadius: 6, overflow: 'hidden' },
   progressBar: { position: 'absolute', top: 0, left: 0, height: '100%', background: '#166534', transition: 'width 0.2s' },
   updateBtnText: { position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: '0.7rem', color: '#e2e8f0', fontFamily: 'monospace' },
