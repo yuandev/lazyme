@@ -35,6 +35,8 @@ export interface StatusResponse {
   build_cmd: string;
   run_cmd: string | null;
   run_mode: string;
+  jvm_args: string | null;
+  envs: Record<string, string>;
 }
 
 export interface CommitInfo {
@@ -124,11 +126,11 @@ export async function fetchTarget(name: string): Promise<{ status: string; remot
   return res.json();
 }
 
-export async function cloneTarget(name: string, newName: string): Promise<{ status: string; name: string }> {
+export async function cloneTarget(name: string, newName: string, repo?: string): Promise<{ status: string; name: string }> {
   const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/clone`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ new_name: newName }),
+    body: JSON.stringify({ new_name: newName, repo: repo || undefined }),
   });
   return res.json();
 }
@@ -211,5 +213,24 @@ export async function saveViteConfig(name: string, content: string): Promise<voi
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
+  });
+}
+
+export interface EnvResponse {
+  target: string;
+  jvm_args: string | null;
+  envs: Record<string, string>;
+}
+
+export async function fetchEnv(name: string): Promise<EnvResponse> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/env`);
+  return res.json();
+}
+
+export async function saveEnv(name: string, jvm_args: string | null, envs: Record<string, string>): Promise<void> {
+  await fetch(`${API}/targets/${encodeURIComponent(name)}/env`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jvm_args, envs }),
   });
 }

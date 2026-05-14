@@ -4,7 +4,7 @@ import {
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
   fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
-  fetchViteConfig, saveViteConfig,
+  fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
   restartServer,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
@@ -238,9 +238,11 @@ function TargetDetail({ name }: { name: string }) {
   const handleClone = async () => {
     const newName = prompt('New target name:', `${name}-clone`);
     if (!newName) return;
+    const newRepo = prompt('Repo path (blank = same repo):', status?.repo ?? '');
+    if (newRepo === null) return; // cancelled
     setCloning(true);
     try {
-      await cloneTarget(name, newName);
+      await cloneTarget(name, newName, newRepo.trim() || undefined);
     } catch (e: any) {
       alert(`Clone failed: ${e.message || e}`);
     }
@@ -334,6 +336,8 @@ function TargetDetail({ name }: { name: string }) {
               <Item label="Mode" value={status.run_mode} />
               <Item label="Build" value={status.build_cmd} />
               <Item label="Run" value={status.run_cmd ?? '—'} />
+              <Item label="JVM Args" value={status.jvm_args ?? '—'} />
+              <Item label="Env Vars" value={Object.keys(status.envs).length > 0 ? Object.keys(status.envs).join(', ') : '—'} />
             </div>
           </div>
         </div>
@@ -407,17 +411,20 @@ function ConfigEditor({ name }: { name: string }) {
   const [mavenSettingsPath, setMavenSettingsPath] = useState('');
   const [viteConfig, setViteConfig] = useState('');
   const [viteConfigPath, setViteConfigPath] = useState('');
+  const [jvmArgs, setJvmArgs] = useState('');
+  const [envsText, setEnvsText] = useState('');
   const [localRepo, setLocalRepo] = useState('');
-  const [subTab, setSubTab] = useState<'config' | 'maven' | 'vite' | 'repo'>('config');
+  const [subTab, setSubTab] = useState<'config' | 'maven' | 'vite' | 'env' | 'repo'>('config');
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const [cfg, ms, vc, lr] = await Promise.all([
+      const [cfg, ms, vc, env, lr] = await Promise.all([
         fetchConfig(name),
         fetchMavenSettings(name),
         fetchViteConfig(name),
+        fetchEnv(name),
         fetchLocalRepo(name),
       ]);
       setConfig(cfg.content);
@@ -426,6 +433,8 @@ function ConfigEditor({ name }: { name: string }) {
       setMavenSettingsPath(ms.path);
       setViteConfig(vc.content);
       setViteConfigPath(vc.path);
+      setJvmArgs(env.jvm_args ?? '');
+      setEnvsText(Object.entries(env.envs).map(([k, v]) => `${k}=${v}`).join('\n'));
       setLocalRepo(lr.local_repo);
     } catch {
       // config may not exist yet
@@ -461,6 +470,7 @@ function ConfigEditor({ name }: { name: string }) {
         <button onClick={() => setSubTab('config')} style={styles.subTab('config')}>.deployd/config.toml</button>
         <button onClick={() => setSubTab('maven')} style={styles.subTab('maven')}>Maven Settings</button>
         <button onClick={() => setSubTab('vite')} style={styles.subTab('vite')}>Vite Config</button>
+        <button onClick={() => setSubTab('env')} style={styles.subTab('env')}>Env Vars</button>
         <button onClick={() => setSubTab('repo')} style={styles.subTab('repo')}>Local Repo</button>
       </div>
 
@@ -524,6 +534,47 @@ function ConfigEditor({ name }: { name: string }) {
               style={styles.btn}
             >
               {saving ? 'Saving...' : 'Save vite.config.ts'}
+            </button>
+            <span style={styles.status}>{statusMsg}</span>
+          </div>
+        </div>
+      )}
+
+      {subTab === 'env' && (
+        <div style={s.card}>
+          <div style={{ marginBottom: '1rem' }}>
+            <div style={s.label}>JVM Arguments</div>
+            <input
+              value={jvmArgs}
+              onChange={(e) => setJvmArgs(e.target.value)}
+              style={styles.input}
+              placeholder="-Xmx512m -Dserver.port=8080"
+            />
+          </div>
+          <div style={{ marginBottom: '1rem' }}>
+            <div style={s.label}>Environment Variables (KEY=VALUE, one per line)</div>
+            <textarea
+              value={envsText}
+              onChange={(e) => setEnvsText(e.target.value)}
+              style={{ ...styles.textarea, minHeight: 150 }}
+              placeholder="JAVA_HOME=/usr/lib/jvm/java-17&#10;SPRING_PROFILES_ACTIVE=prod"
+              spellCheck={false}
+            />
+          </div>
+          <div style={{ marginTop: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <button
+              onClick={() => save(async () => {
+                const envs: Record<string, string> = {};
+                envsText.split('\n').forEach(line => {
+                  const idx = line.indexOf('=');
+                  if (idx > 0) envs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
+                });
+                await saveEnv(name, jvmArgs || null, envs);
+              })}
+              disabled={saving}
+              style={styles.btn}
+            >
+              {saving ? 'Saving...' : 'Save env vars'}
             </button>
             <span style={styles.status}>{statusMsg}</span>
           </div>

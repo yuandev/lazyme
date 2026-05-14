@@ -96,6 +96,8 @@ struct StatusResponse {
     build_cmd: String,
     run_cmd: Option<String>,
     run_mode: String,
+    jvm_args: Option<String>,
+    envs: HashMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -207,6 +209,8 @@ async fn target_status(
         build_cmd: t.build_cmd.clone(),
         run_cmd: t.run_cmd.clone(),
         run_mode: t.run_mode.clone(),
+        jvm_args: t.jvm_args.clone(),
+        envs: t.envs.clone(),
     }))
 }
 
@@ -709,6 +713,7 @@ async fn target_fetch(
 #[derive(Deserialize)]
 struct CloneBody {
     new_name: String,
+    repo: Option<String>,
 }
 
 fn increment_port(s: &str) -> String {
@@ -756,9 +761,33 @@ async fn target_clone(
         return Err((StatusCode::CONFLICT, format!("target '{new_name}' already exists")));
     }
 
+    // Use custom repo path or fall back to source repo
+    let repo = if let Some(ref custom_repo) = body.repo {
+        let p = PathBuf::from(custom_repo.trim());
+        if p == source.repo {
+            source.repo.clone()
+        } else {
+            // Create directory if needed; init git if not already a repo
+            std::fs::create_dir_all(&p)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let git_dir = p.join(".git");
+            if !git_dir.exists() {
+                let branch = source.branch();
+                std::process::Command::new("git")
+                    .args(["clone", "--branch", &branch, &source.repo.display().to_string(), &p.display().to_string()])
+                    .output()
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            p
+        }
+    } else {
+        source.repo.clone()
+    };
+
     // Build cloned config with auto-incremented ports
     let cloned_run_cmd = source.run_cmd.as_ref().map(|c| increment_port(c));
     let cloned_health_url = source.health_url.as_ref().map(|u| increment_port(u));
+    let cloned_jvm_args = source.jvm_args.as_ref().map(|j| increment_port(j));
 
     // Write new profile config
     let profile = Some(new_name.clone());
@@ -782,6 +811,17 @@ async fn target_clone(
         if source.health_timeout != 30 {
             run.insert("health_timeout".into(), toml::Value::Integer(source.health_timeout as i64));
         }
+        if let Some(ref ja) = cloned_jvm_args {
+            run.insert("jvm_args".into(), toml::Value::String(ja.clone()));
+        }
+        if !source.envs.is_empty() {
+            let mut env = toml::Table::new();
+            for (k, v) in &source.envs {
+                env.insert(k.clone(), toml::Value::String(v.clone()));
+            }
+            table.insert("env".into(), toml::Value::Table(env));
+        }
+        run.insert("mode".into(), toml::Value::String(source.run_mode.clone()));
         table.insert("run".into(), toml::Value::Table(run));
     }
     {
@@ -790,7 +830,7 @@ async fn target_clone(
         table.insert("watch".into(), toml::Value::Table(watch));
     }
 
-    let config_path = source.repo.join(".deployd").join(format!("config.{new_name}.toml"));
+    let config_path = repo.join(".deployd").join(format!("config.{new_name}.toml"));
     std::fs::create_dir_all(config_path.parent().unwrap())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
@@ -799,7 +839,7 @@ async fn target_clone(
     // Append to registry
     let entry = crate::registry::TargetEntry {
         name: new_name.clone(),
-        repo: source.repo.clone(),
+        repo: repo.clone(),
         profile,
     };
     crate::registry::append_entry(&entry)
@@ -808,7 +848,7 @@ async fn target_clone(
     // Create new TargetState and insert
     let ts = Arc::new(TargetState {
         name: new_name.clone(),
-        repo: source.repo.clone(),
+        repo: repo.clone(),
         remote: source.remote.clone(),
         branch: Mutex::new(source.branch()),
         build_cmd: source.build_cmd.clone(),
@@ -816,11 +856,11 @@ async fn target_clone(
         run_cmd: cloned_run_cmd,
         health_url: cloned_health_url,
         health_timeout: source.health_timeout,
-        jvm_args: source.jvm_args.as_ref().map(|j| increment_port(j)),
+        jvm_args: cloned_jvm_args,
         envs: source.envs.clone(),
         run_mode: source.run_mode.clone(),
         process: Mutex::new(None),
-        state: Mutex::new(crate::state::StateManager::new(&source.repo)),
+        state: Mutex::new(crate::state::StateManager::new(&repo)),
         profile: Some(new_name.clone()),
     });
 
@@ -1134,6 +1174,99 @@ async fn target_put_vite_config(
     Ok(Json(serde_json::json!({"status": "ok", "target": name, "path": path.display().to_string()})))
 }
 
+// ── Env vars & JVM args read/write ──
+
+#[derive(Deserialize)]
+struct EnvBody {
+    jvm_args: Option<String>,
+    envs: Option<HashMap<String, String>>,
+}
+
+/// GET /api/targets/{name}/env — read jvm_args and env vars from config
+async fn target_get_env(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    Ok(Json(serde_json::json!({
+        "target": name,
+        "jvm_args": t.jvm_args,
+        "envs": t.envs,
+    })))
+}
+
+/// PUT /api/targets/{name}/env — update jvm_args and env vars in config.toml
+async fn target_put_env(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<EnvBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    // Load existing config toml, update run.jvm_args and [env], write back
+    let deploy_dir = t.repo.join(".deployd");
+    let config_path = if let Some(ref p) = t.profile {
+        let profiled = deploy_dir.join(format!("config.{p}.toml"));
+        if profiled.exists() { profiled } else { deploy_dir.join("config.toml") }
+    } else {
+        deploy_dir.join("config.toml")
+    };
+
+    std::fs::create_dir_all(&deploy_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let mut table: toml::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        toml::Table::new()
+    };
+
+    // Update run.jvm_args
+    if let Some(ref ja) = body.jvm_args {
+        let run = table.entry("run").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let toml::Value::Table(r) = run {
+            if ja.is_empty() {
+                r.remove("jvm_args");
+            } else {
+                r.insert("jvm_args".into(), toml::Value::String(ja.clone()));
+            }
+        }
+    }
+
+    // Update [env] section
+    if let Some(ref envs) = body.envs {
+        if envs.is_empty() {
+            table.remove("env");
+        } else {
+            let mut env = toml::Table::new();
+            for (k, v) in envs {
+                env.insert(k.clone(), toml::Value::String(v.clone()));
+            }
+            table.insert("env".into(), toml::Value::Table(env));
+        }
+    }
+
+    std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "target": name,
+        "hint": "Changes saved to config. They will take effect on next deploy."
+    })))
+}
+
 // ── Local repo path ──
 
 fn resolve_local_repo_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
@@ -1190,6 +1323,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
         .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
         .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
+        .route("/api/targets/{name}/env", get(target_get_env).put(target_put_env))
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
         .route("/api/reload", post(reload_config))
         .route("/api/self-update", post(self_update_handler))
