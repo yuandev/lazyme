@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::io::Write;
 
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CURRENT_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("GIT_COMMIT_HASH"));
 const CURRENT_TARGET: &str = env!("TARGET");
 
 #[derive(Deserialize)]
