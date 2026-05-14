@@ -18,7 +18,7 @@ pub struct Args {
     /// One or more target names to watch (default: all from targets.toml)
     pub filter: Vec<String>,
 
-    /// Path to deployd source repo for self-update (default: built-in manifest dir)
-    #[arg(long)]
-    pub self_update_repo: Option<String>,
+    /// GitHub owner/repo for self-update (default: yuandev/lazyme)
+    #[arg(long, default_value = "yuandev/lazyme")]
+    pub update_repo: String,
 }

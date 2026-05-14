@@ -25,8 +25,7 @@ pub struct AppState {
     pub interval: u64,
     pub tx: broadcast::Sender<WsEvent>,
     pub build_lock: Arc<BuildLock>,
-    pub self_update_repo: PathBuf,
-    pub self_update_remote: String,
+    pub update_repo: String,
 }
 
 /// Per-target configuration and state.
@@ -687,12 +686,16 @@ async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
 
 // ── Self-update ──
 
-/// POST /api/self-update — check, pull, build, restart (runs in background)
+/// POST /api/self-update — check GitHub Releases, download, restart
 async fn self_update_handler(
     State(s): State<SharedState>,
 ) -> Json<serde_json::Value> {
-    let repo = s.self_update_repo.clone();
-    let remote_name = s.self_update_remote.clone();
+    let parts: Vec<&str> = s.update_repo.split('/').collect();
+    if parts.len() != 2 {
+        return Json(serde_json::json!({"status": "error", "message": "invalid update-repo format (expected owner/repo)"}));
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+
     let tx = s.tx.clone();
 
     let _ = tx.send(WsEvent {
@@ -702,25 +705,26 @@ async fn self_update_handler(
         message: None,
     });
 
-    // Check first — return immediately with status
-    match crate::self_update::check(&repo, &remote_name, "main") {
-        Ok(Some(remote)) => {
-            let return_commit = remote.clone();
+    match crate::self_update::check(owner, repo).await {
+        Ok(Some(version)) => {
+            let ret_version = version.clone();
             let tx2 = tx.clone();
+            let owner = owner.to_string();
+            let repo = repo.to_string();
             tokio::spawn(async move {
                 let _ = tx2.send(WsEvent {
                     event: "self_update_pulling".into(),
                     target: String::new(),
-                    commit: Some(remote),
+                    commit: Some(version.clone()),
                     message: None,
                 });
 
-                match crate::self_update::update(&repo, &remote_name, "main") {
-                    Ok(new_hash) => {
+                match crate::self_update::update(&owner, &repo).await {
+                    Ok(new_version) => {
                         let _ = tx2.send(WsEvent {
                             event: "self_update_complete".into(),
                             target: String::new(),
-                            commit: Some(new_hash),
+                            commit: Some(new_version),
                             message: None,
                         });
                         tracing::info!("Self-update complete, restarting...");
@@ -736,7 +740,7 @@ async fn self_update_handler(
                     }
                 }
             });
-            Json(serde_json::json!({"status": "updating", "commit": return_commit}))
+            Json(serde_json::json!({"status": "updating", "version": ret_version}))
         }
         Ok(None) => Json(serde_json::json!({"status": "up_to_date"})),
         Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),

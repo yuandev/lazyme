@@ -28,6 +28,7 @@ fn main() {
         .unwrap_or_else(|| "unknown".into());
 
     println!("cargo:rustc-env=GIT_COMMIT_HASH={hash}");
+    println!("cargo:rustc-env=TARGET={}", std::env::var("TARGET").unwrap());
     println!("cargo:rerun-if-changed=frontend/src/");
     println!("cargo:rerun-if-changed=frontend/package.json");
 }

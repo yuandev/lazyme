@@ -34,13 +34,17 @@ async fn main() -> anyhow::Result<()> {
     let args = config::Args::parse();
 
     // Self-update check (warn if newer version available)
-    let self_update_repo = args
-        .self_update_repo
-        .clone()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    if let Ok(Some(remote)) = self_update::check(&self_update_repo, &args.remote, "main") {
-        warn!("lazyme update available: {remote}. POST /api/self-update to update.");
+    let parts: Vec<&str> = args.update_repo.split('/').collect();
+    if parts.len() == 2 {
+        match self_update::check(parts[0], parts[1]).await {
+            Ok(Some(version)) => {
+                warn!("lazyme update available: v{version}. POST /api/self-update to update.");
+            }
+            Err(e) => {
+                warn!("self-update check failed: {e}");
+            }
+            _ => {}
+        }
     }
 
     // Load target registry
@@ -90,8 +94,7 @@ async fn main() -> anyhow::Result<()> {
         interval: args.interval,
         tx,
         build_lock: build_lock.clone(),
-        self_update_repo,
-        self_update_remote: args.remote.clone(),
+        update_repo: args.update_repo.clone(),
     });
 
     // Start one poller per target

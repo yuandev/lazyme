@@ -1,77 +1,82 @@
-use std::path::Path;
-use std::process::Command;
+use serde::Deserialize;
 
-/// Returns the latest remote commit hash for the deployd repo.
-fn remote_head(repo: &Path, remote: &str, branch: &str) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["ls-remote", "--heads", remote, branch])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| anyhow::anyhow!("git ls-remote: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git ls-remote failed: {stderr}");
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.split_whitespace().next().unwrap_or("").to_string())
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CURRENT_TARGET: &str = env!("TARGET");
+
+#[derive(Deserialize)]
+struct Release {
+    tag_name: String,
+    assets: Vec<Asset>,
 }
 
-/// Returns the local HEAD hash.
-fn local_head(repo: &Path) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| anyhow::anyhow!("git rev-parse: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git rev-parse failed: {stderr}");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+#[derive(Deserialize)]
+struct Asset {
+    name: String,
+    browser_download_url: String,
 }
 
-/// Check if a newer version is available on the remote.
-pub fn check(repo: &Path, remote: &str, branch: &str) -> anyhow::Result<Option<String>> {
-    let remote_hash = remote_head(repo, remote, branch)?;
-    let local = local_head(repo)?;
-    if remote_hash.is_empty() || remote_hash == local {
-        Ok(None)
+fn asset_name() -> String {
+    format!("deployd-{CURRENT_TARGET}")
+}
+
+/// Check if a newer release is available on GitHub.
+pub async fn check(owner: &str, repo: &str) -> anyhow::Result<Option<String>> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent("deployd")
+        .build()?;
+    let release: Release = client.get(&url).send().await?.json().await?;
+    let latest = release.tag_name.strip_prefix('v').unwrap_or(&release.tag_name);
+    if latest != CURRENT_VERSION {
+        Ok(Some(latest.to_string()))
     } else {
-        Ok(Some(remote_hash))
+        Ok(None)
     }
 }
 
-/// Pull latest code and rebuild. Returns the new commit hash on success.
-pub fn update(repo: &Path, remote: &str, branch: &str) -> anyhow::Result<String> {
-    let output = Command::new("git")
-        .args(["pull", "--ff-only", remote, branch])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| anyhow::anyhow!("git pull: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("git pull failed: {stderr}");
+/// Download the latest binary for the current platform, replace this binary.
+pub async fn update(owner: &str, repo: &str) -> anyhow::Result<String> {
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent("deployd")
+        .build()?;
+    let release: Release = client.get(&url).send().await?.json().await?;
+
+    let name = asset_name();
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no asset found for {CURRENT_TARGET} (expected: {name})"))?;
+
+    let current_exe = std::env::current_exe()?;
+    let tmp = current_exe.with_extension("tmp");
+
+    let resp = client.get(&asset.browser_download_url).send().await?;
+    let bytes = resp.bytes().await?;
+    std::fs::write(&tmp, &bytes)?;
+
+    // Make executable on unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    let new_hash = local_head(repo)?;
+    std::fs::rename(&tmp, &current_exe)?;
 
-    let output = Command::new("cargo")
-        .args(["build", "--release"])
-        .current_dir(repo)
-        .output()
-        .map_err(|e| anyhow::anyhow!("cargo build: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("cargo build failed: {stderr}");
-    }
-
-    Ok(new_hash)
+    let new_version = release
+        .tag_name
+        .strip_prefix('v')
+        .unwrap_or(&release.tag_name)
+        .to_string();
+    Ok(new_version)
 }
 
 /// Restart the current binary, replacing this process.
 pub fn restart() -> ! {
     let exe = std::env::current_exe().expect("cannot find current exe");
-    let mut cmd = Command::new(&exe);
+    let mut cmd = std::process::Command::new(&exe);
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
         cmd.args(&args);
