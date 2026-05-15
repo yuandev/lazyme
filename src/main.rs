@@ -152,28 +152,18 @@ async fn main() -> anyhow::Result<()> {
     let app = api::router(shared).fallback(serve_frontend);
 
     // Try ports starting from the configured port, auto-increment if in use
-    let mut port = args.port;
-    let mut retries = 0u32;
+    let addr = format!("0.0.0.0:{}", args.port);
     let listener = loop {
-        let addr = format!("0.0.0.0:{port}");
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => break l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                // Retry the original port 3 times (1s delay) before incrementing
-                // This handles restart where the old process is still releasing the port
-                if port == args.port && retries < 3 {
-                    warn!("Port {port} in use, retrying in 1s (attempt {}/3)...", retries + 1);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    retries += 1;
-                } else {
-                    warn!("Port {port} in use, trying {}...", port + 1);
-                    port += 1;
-                }
+                warn!("Port {} in use, retrying in 1s...", args.port);
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => return Err(e.into()),
         }
     };
-    info!("Web UI listening at http://localhost:{port}");
+    info!("Web UI listening at http://localhost:{}", args.port);
     axum::serve(listener, app).await?;
 
     Ok(())
@@ -194,14 +184,22 @@ pub async fn poll_loop(
 
         // Periodic health check (runs every poll interval, not just on deploy)
         if let Some(ref url) = target.health_url {
-            let resolved_url = if let Some(port) = target.jvm_args.lock().unwrap().as_ref()
-                .and_then(|ja| ja.split_whitespace()
-                    .find(|a| a.starts_with("-Dserver.port="))
-                    .and_then(|a| a.split('=').nth(1)))
-            {
-                url.replace("{port}", port)
-            } else {
-                url.clone()
+            // Resolve port: actual PID port > jvm_args port > static URL
+            let resolved_url = {
+                let proc = target.process.lock().unwrap();
+                let pid = proc.as_ref().and_then(|p| p.pid());
+                drop(proc);
+                if let Some(pid) = pid.and_then(|p| process::detect_port(p)) {
+                    url.replace("{port}", &pid.to_string())
+                } else if let Some(port) = target.jvm_args.lock().unwrap().as_ref()
+                    .and_then(|ja| ja.split_whitespace()
+                        .find(|a| a.starts_with("-Dserver.port="))
+                        .and_then(|a| a.split('=').nth(1)))
+                {
+                    url.replace("{port}", port)
+                } else {
+                    url.clone()
+                }
             };
             let ok = process::health_check(&resolved_url, 5).await;
             let status = api::HealthStatus {

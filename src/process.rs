@@ -109,3 +109,26 @@ pub async fn health_check(url: &str, timeout_secs: u64) -> bool {
     }
     false
 }
+
+/// Detect the actual listening TCP port for a given PID on Linux.
+/// Reads /proc/<pid>/net/tcp, finds LISTEN (0A) sockets, returns first port.
+pub fn detect_port(pid: u32) -> Option<u16> {
+    let path = format!("/proc/{pid}/net/tcp");
+    let content = std::fs::read_to_string(&path).ok()?;
+    for line in content.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        // sl local_address rem_address st ...
+        // local_address is hex like 00000000:1F90 (0.0.0.0:8080)
+        if parts.len() >= 4 && parts[3] == "0A" {
+            // 0A = LISTEN
+            if let Some(addr) = parts.get(1) {
+                if let Some(port_hex) = addr.split(':').nth(1) {
+                    if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
+}

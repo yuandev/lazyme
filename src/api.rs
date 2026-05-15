@@ -243,12 +243,22 @@ async fn target_status(
     };
     // On-demand health check when viewing target detail
     let health_status = if let Some(ref url) = t.health_url {
-        let resolved = t.jvm_args.lock().unwrap().as_ref()
-            .and_then(|ja| ja.split_whitespace()
-                .find(|a| a.starts_with("-Dserver.port="))
-                .and_then(|a| a.split('=').nth(1)))
-            .map(|p| url.replace("{port}", p))
-            .unwrap_or_else(|| url.clone());
+        let resolved = {
+            let proc = t.process.lock().unwrap();
+            let pid = proc.as_ref().and_then(|p| p.pid());
+            drop(proc);
+            if let Some(port) = pid.and_then(|p| crate::process::detect_port(p)) {
+                url.replace("{port}", &port.to_string())
+            } else if let Some(port) = t.jvm_args.lock().unwrap().as_ref()
+                .and_then(|ja| ja.split_whitespace()
+                    .find(|a| a.starts_with("-Dserver.port="))
+                    .and_then(|a| a.split('=').nth(1)))
+            {
+                url.replace("{port}", port)
+            } else {
+                url.clone()
+            }
+        };
         let ok = crate::process::health_check(&resolved, 3).await;
         let hs = Some(HealthStatus { ok, last_check: chrono::Utc::now().to_rfc3339() });
         *t.health_status.lock().unwrap() = hs.clone();
