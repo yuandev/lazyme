@@ -57,17 +57,18 @@ Create `~/.config/lazyme/targets.toml`:
 ```toml
 [[targets]]
 name = "my-api"
+label = "My API Service"    # optional display name
 repo = "/home/me/projects/my-api"
-profile = "dev"   # optional: loads .deployd/config.dev.toml
+group = "backend"           # optional group for sidebar organization
 
 [[targets]]
 name = "frontend"
 repo = "/home/me/projects/frontend"
 ```
 
-### 3. Add per-project config (optional)
+### 3. Add target config (optional)
 
-In each repo, create `.deployd/config.toml`:
+Create `~/.config/lazyme/targets/{name}.toml` (auto-generated on first deploy if missing):
 
 ```toml
 [watch]
@@ -83,13 +84,15 @@ local_repo = "/path/to/maven/repo"         # optional
 mode = "deploy"              # "deploy" (default) or "dev" (skip build)
 command = "java {jvm_args} -jar {artifact}"
 jvm_args = "-Xmx512m -Dserver.port=8080"
-health_url = "http://localhost:8080/health"
+health_url = "http://localhost:{port}/health"  # {port} detected from PID or jvm_args
 health_timeout = 30
 
 [env]
 JAVA_HOME = "/usr/lib/jvm/java-17"
 SPRING_PROFILES_ACTIVE = "prod"
 ```
+
+Config lives under `~/.config/lazyme/targets/{name}.toml` — isolated from the git repo. Legacy `{repo}/.deployd/config.toml` is auto-migrated on first load.
 
 All fields are optional. CLI args override project config, project config overrides built-in defaults.
 
@@ -127,14 +130,18 @@ Options:
 
 ### Web Dashboard
 
-- **Status tab**: live view of deployed commit, git state, build/run commands, JVM args, env vars
-- **Commits tab**: recent commits with rollback and log viewer
-- **History tab**: deployment history with cache status
-- **Config tab**: edit `.deployd/config.toml`, Maven settings, `vite.config.ts`, JVM args and env vars
-- **Branch switch**: dropdown with all remote branches, persists to config
-- **Clone target**: duplicate a target with custom repo path for independent deploys
+- **Status tab**: live view of deployed commit, git state, build/run commands, JVM args, env vars, PID and uptime
+- **Online/offline indicator**: green/red badge based on real TCP health check (polled every interval)
+- **Commits tab**: recent commits with one-click deploy/rollback and build log viewer
+- **History tab**: deployment history with cache status, build duration, and log access
+- **Config tab**: edit config.toml, Maven settings, vite.config.ts, JVM args, and env vars
+- **Add target**: modal form to create a new target with optional git clone
+- **Rename / Clone / Delete**: sidebar buttons per target; delete shows stop → verify → remove flow
+- **Branch switch**: dropdown with remote branches, refresh button, auto-creates local tracking branch
 - **Open service**: launch the deployed service URL in browser
 - **i18n**: English / Chinese toggle
+- **WebSocket live logs**: stream build output in real time
+- **Auto-deploy pause**: temporarily stop automatic deployments per target
 
 ### Self-Update
 
@@ -152,9 +159,11 @@ Set `mode = "dev"` in `[run]` to skip the build step. On new commits, lazyme pul
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | yes | Unique target name |
+| `name` | yes | Unique target name (identifier) |
 | `repo` | yes | Absolute path to local git repository |
-| `profile` | no | Load `.deployd/config.{profile}.toml` |
+| `label` | no | Display name in sidebar (defaults to `name`) |
+| `group` | no | Group name for sidebar organization |
+| `profile` | no | Legacy profile support |
 
 ### `.deployd/config.toml` (per-repo, optional)
 
@@ -190,15 +199,20 @@ Flat key-value pairs injected as environment variables into the run command proc
 ## On-Disk Layout
 
 ```
+~/.config/lazyme/
+├── targets.toml                  # target registry
+└── targets/
+    ├── my-api.toml               # per-target config (isolated from repo)
+    └── frontend.toml
+
 my-project/
-└── .deployd/
-    ├── config.toml          # project config
-    ├── state.json           # deploy history (auto-managed)
+└── .deployd/                     # runtime state only
+    ├── state.json                # deploy history (auto-managed)
     ├── artifacts/
     │   └── a1b2c3d/
-    │       └── my-binary    # cached artifact
+    │       └── my-binary         # cached artifact
     └── logs/
-        └── a1b2c3d.log      # build output
+        └── a1b2c3d.log           # build output
 ```
 
 ## API Reference
@@ -215,11 +229,17 @@ my-project/
 | `POST` | `/api/targets/{name}/rollback` | Rollback to commit |
 | `GET` | `/api/targets/{name}/branches` | List remote branches |
 | `POST` | `/api/targets/{name}/branch` | Switch branch |
-| `POST` | `/api/targets/{name}/fetch` | Git fetch + pull |
-| `POST` | `/api/targets/{name}/clone` | Clone target |
+| `POST` | `/api/targets/{name}/fetch` | Git fetch (all remote refs) |
+| `POST` | `/api/targets/{name}/clone` | Clone target config |
+| `POST` | `/api/targets/{name}/rename` | Rename target |
+| `DELETE` | `/api/targets/{name}` | Delete target (stop service → verify → remove) |
+| `POST` | `/api/targets` | Create new target |
 | `GET/PUT` | `/api/targets/{name}/config` | Read/write config.toml |
+| `GET/PUT` | `/api/targets/{name}/maven-settings` | Read/write Maven settings.xml |
 | `GET/PUT` | `/api/targets/{name}/vite-config` | Read/write vite.config.ts |
 | `GET/PUT` | `/api/targets/{name}/env` | Read/write JVM args + env vars |
+| `GET` | `/api/targets/{name}/local-repo` | Get local Maven repo path |
+| `POST` | `/api/targets/{name}/auto-deploy` | Toggle auto-deploy pause/resume |
 | `POST` | `/api/self-update` | Check + download update |
 | `POST` | `/api/restart` | Restart server |
 | `GET` | `/api/version` | Current version |
