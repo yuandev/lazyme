@@ -34,7 +34,7 @@ pub fn short_hash(repo: &Path, full_hash: &str) -> Result<String> {
 }
 
 pub fn pull(repo: &Path, remote: &str, branch: &str) -> Result<()> {
-    git(&["fetch", remote, branch], repo)?;
+    git(&["fetch", remote], repo)?;  // fetch all remote refs
     git(&["checkout", &format!("{remote}/{branch}")], repo)?;
     Ok(())
 }

@@ -840,6 +840,13 @@ async fn target_set_branch(
         tracing::warn!("Failed to save branch to config: {e}");
     }
 
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: t.name.clone(),
+        commit: None,
+        message: None,
+    });
+
     Ok(Json(serde_json::json!({"status": "ok", "branch": t.branch()})))
 }
 
@@ -901,6 +908,13 @@ async fn target_fetch(
 
     git::pull(&t.repo, &t.remote, &branch)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: t.name.clone(),
+        commit: Some(remote.clone()),
+        message: None,
+    });
 
     Ok(Json(serde_json::json!({
         "status": "ok",
