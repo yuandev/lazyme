@@ -383,7 +383,6 @@ function TargetDetail({ name }: { name: string }) {
                 setStopping(true);
                 await stopTarget(name);
                 setStopping(false); setStopOk(true);
-                await refresh();
                 setTimeout(() => setStopOk(false), 2000);
               }}
               disabled={stopping || stopOk || !status.process_running}
