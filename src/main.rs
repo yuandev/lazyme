@@ -28,7 +28,7 @@ use tokio::sync::broadcast;
 #[folder = "frontend/dist/"]
 struct Frontend;
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
