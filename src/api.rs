@@ -610,6 +610,15 @@ pub async fn build_and_cache(
     };
 
     // Kill old process, start new one
+    // Extract port from jvm_args for {port} placeholder
+    let port = jvm_args
+        .and_then(|ja| {
+            ja.split_whitespace()
+                .find(|a| a.starts_with("-Dserver.port="))
+                .and_then(|a| a.split('=').nth(1))
+                .map(|s| s.to_string())
+        });
+
     if success {
         if let Some(ref cmd) = run_cmd {
             let mut proc = process.lock().unwrap();
@@ -623,6 +632,9 @@ pub async fn build_and_cache(
             };
             if let Some(ref ja) = jvm_args {
                 resolved = resolved.replace("{jvm_args}", ja);
+            }
+            if let Some(ref p) = port {
+                resolved = resolved.replace("{port}", p);
             }
             match ManagedProcess::spawn(&resolved, repo, envs) {
                 Ok(p) => *proc = Some(p),
@@ -642,12 +654,15 @@ pub async fn build_and_cache(
         });
     }
 
-    // Health check
+    // Health check — resolve {port} placeholder
     let hc_ok = if success && run_cmd.is_some() {
         if let Some(url) = health_url {
-            let ok = process::health_check(url, health_timeout).await;
+            let resolved_url = port.as_ref()
+                .map(|p| url.replace("{port}", p))
+                .unwrap_or_else(|| url.to_string());
+            let ok = process::health_check(&resolved_url, health_timeout).await;
             if !ok {
-                tracing::warn!("Health check failed for {url}");
+                tracing::warn!("Health check failed for {resolved_url}");
             }
             ok
         } else { true }
