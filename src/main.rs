@@ -191,6 +191,25 @@ pub async fn poll_loop(
     loop {
         timer.tick().await;
 
+        // Periodic health check (runs every poll interval, not just on deploy)
+        if let Some(ref url) = target.health_url {
+            let resolved_url = if let Some(port) = target.jvm_args.lock().unwrap().as_ref()
+                .and_then(|ja| ja.split_whitespace()
+                    .find(|a| a.starts_with("-Dserver.port="))
+                    .and_then(|a| a.split('=').nth(1)))
+            {
+                url.replace("{port}", port)
+            } else {
+                url.clone()
+            };
+            let ok = process::health_check(&resolved_url, 5).await;
+            let status = api::HealthStatus {
+                ok,
+                last_check: chrono::Utc::now().to_rfc3339(),
+            };
+            *target.health_status.lock().unwrap() = Some(status);
+        }
+
         let branch = target.branch();
 
         let remote = match git::remote_head(&target.repo, &target.remote, &branch) {
