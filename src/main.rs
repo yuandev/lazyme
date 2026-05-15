@@ -28,7 +28,7 @@ use tokio::sync::broadcast;
 #[folder = "frontend/dist/"]
 struct Frontend;
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         update_repo: args.update_repo.clone(),
     });
 
-    // Start one poller per target
+    // Start one poller per target, each with random jitter per tick
     let n = shared.targets.read().unwrap().len();
     info!("Starting {} poll loop(s)...", n);
     for target in shared.targets.read().unwrap().values() {
@@ -177,48 +177,79 @@ pub async fn poll_loop(
     tx: broadcast::Sender<api::WsEvent>,
     build_lock: Arc<queue::BuildLock>,
 ) {
-    let interval = tokio::time::Duration::from_secs(interval_secs);
-    tokio::time::sleep(interval).await;
-    let mut timer = tokio::time::interval(interval);
-
     loop {
-        timer.tick().await;
+        // 60 ± random: add ±8s jitter per tick so no two targets sync up
+        let jitter: i64 = rand::random::<u64>() as i64 % 17 - 8;
+        let sleep_secs = (interval_secs as i64 + jitter).max(1) as u64;
+        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
 
         // Periodic health check (runs every poll interval, not just on deploy)
         if let Some(ref url) = target.health_url {
             // Resolve port: actual PID port > jvm_args port > static URL
-            let resolved_url = {
+            let pid_for_port = {
                 let proc = target.process.lock().unwrap();
-                let pid = proc.as_ref().and_then(|p| p.pid());
-                drop(proc);
-                if let Some(pid) = pid.and_then(|p| process::detect_port(p)) {
-                    url.replace("{port}", &pid.to_string())
-                } else if let Some(port) = target.jvm_args.lock().unwrap().as_ref()
-                    .and_then(|ja| ja.split_whitespace()
-                        .find(|a| a.starts_with("-Dserver.port="))
-                        .and_then(|a| a.split('=').nth(1)))
-                {
-                    url.replace("{port}", port)
-                } else {
-                    url.clone()
-                }
+                proc.as_ref().and_then(|p| p.pid())
+            };
+            let resolved_url = if let Some(port) = pid_for_port
+                .and_then(|p| process::detect_port(p))
+            {
+                url.replace("{port}", &port.to_string())
+            } else if let Some(port) = target.jvm_args.lock().unwrap().as_ref()
+                .and_then(|ja| ja.split_whitespace()
+                    .find(|a| a.starts_with("-Dserver.port="))
+                    .and_then(|a| a.split('=').nth(1)))
+            {
+                url.replace("{port}", port)
+            } else {
+                url.clone()
             };
             let ok = process::health_check(&resolved_url, 5).await;
-            let status = api::HealthStatus {
+            *target.health_status.lock().unwrap() = Some(api::HealthStatus {
                 ok,
                 last_check: chrono::Utc::now().to_rfc3339(),
-            };
-            *target.health_status.lock().unwrap() = Some(status);
+            });
         }
 
         let branch = target.branch();
 
-        // Cache local head
-        if let Ok(lh) = git::local_head(&target.repo) {
-            *target.cached_local_head.lock().unwrap() = Some(lh);
+        // Cache local head — use spawn_blocking to keep worker threads free for HTTP
+        let repo = target.repo.clone();
+        let repo2 = repo.clone();
+        let remote = target.remote.clone();
+
+        let lh = tokio::task::spawn_blocking(move || git::local_head(&repo)).await.unwrap_or_else(|e| {
+            warn!("[{}] spawn_blocking local_head panicked: {e}", target.name);
+            Err(anyhow::anyhow!("panic"))
+        });
+        if let Ok(ref h) = lh {
+            *target.cached_local_head.lock().unwrap() = Some(h.clone());
         }
 
-        let remote = match git::remote_head(&target.repo, &target.remote, &branch) {
+        let remote_head_result = {
+            let repo = repo2.clone();
+            let remote = remote.clone();
+            let branch = branch.clone();
+            let name = target.name.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                tokio::task::spawn_blocking(move || {
+                    git::remote_head(&repo, &remote, &branch)
+                })
+            ).await {
+                Ok(Ok(Ok(h))) => Ok(h),
+                Ok(Ok(Err(e))) => Err(e),
+                Ok(Err(e)) => {
+                    warn!("[{name}] spawn_blocking remote_head panicked: {e}");
+                    Err(anyhow::anyhow!("panic"))
+                }
+                Err(_) => {
+                    warn!("[{name}] remote_head timed out");
+                    Err(anyhow::anyhow!("timeout"))
+                }
+            }
+        };
+
+        let remote = match remote_head_result {
             Ok(h) => {
                 *target.cached_remote_head.lock().unwrap() = Some(h.clone());
                 h
@@ -279,9 +310,32 @@ pub async fn poll_loop(
 
         info!("[{}] new commit: {remote}, pulling...", target.name);
 
-        if let Err(e) = git::pull(&target.repo, &target.remote, &branch) {
-            error!("[{}] pull failed: {e}", target.name);
-            continue;
+        {
+            let repo = repo2.clone();
+            let remote = remote.clone();
+            let branch = branch.clone();
+            let name = target.name.clone();
+            let pull_result = match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::task::spawn_blocking(move || {
+                    git::pull(&repo, &remote, &branch)
+                })
+            ).await {
+                Ok(Ok(Ok(()))) => Ok(()),
+                Ok(Ok(Err(e))) => Err(e),
+                Ok(Err(e)) => {
+                    warn!("[{name}] spawn_blocking pull panicked: {e}");
+                    Err(anyhow::anyhow!("panic"))
+                }
+                Err(_) => {
+                    warn!("[{name}] git pull timed out");
+                    Err(anyhow::anyhow!("timeout"))
+                }
+            };
+            if let Err(e) = pull_result {
+                error!("[{}] pull failed: {e}", target.name);
+                continue;
+            }
         }
 
         // Acquire build lock to serialize builds across targets

@@ -29,7 +29,7 @@ targets.toml        .deployd/config.toml
                                     健康检查 (TCP)
 ```
 
-- **轮询**: 每个目标按配置的间隔检查 `git ls-remote`
+- **轮询**: 每个目标按配置的间隔检查 `git ls-remote`，每次随机抖动 ±8 秒避免同时触发
 - **拉取**: 发现新提交时 fetch + checkout 远程分支
 - **构建**: 执行构建命令，stdout 写入 `.deployd/logs/{hash}.log`（dev 模式下跳过）
 - **缓存**: 构建产物复制到 `.deployd/artifacts/{short_hash}/`

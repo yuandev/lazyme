@@ -33,7 +33,7 @@ targets.toml        .deployd/config.toml
                                     health check (TCP)
 ```
 
-- **Poll**: each target checks `git ls-remote` on an interval
+- **Poll**: each target checks `git ls-remote` with random jitter (±8s) to avoid thundering herd
 - **Pull**: fetches + checks out the remote branch when a new commit appears
 - **Build**: runs the build command, captures stdout → `.deployd/logs/{hash}.log` (skipped in dev mode)
 - **Cache**: copies the build artifact to `.deployd/artifacts/{short_hash}/`

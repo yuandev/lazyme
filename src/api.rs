@@ -201,26 +201,7 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
 async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> {
     let targets = s.targets.read().unwrap();
 
-    // Quick parallel health checks — online services respond <1ms
-    let health_futures: Vec<_> = targets.iter().map(|(_, t)| {
-        let t = t.clone();
-        tokio::spawn(async move {
-            let url = t.health_url.clone();
-            let jvm_args = t.jvm_args.lock().unwrap().clone();
-            if let Some(ref url) = url {
-                let resolved = jvm_args.as_ref()
-                    .and_then(|ja| ja.split_whitespace()
-                        .find(|a| a.starts_with("-Dserver.port="))
-                        .and_then(|a| a.split('=').nth(1)))
-                    .map(|p| url.replace("{port}", p))
-                    .unwrap_or_else(|| url.clone());
-                let ok = process::health_check(&resolved, 2).await;
-                *t.health_status.lock().unwrap() = Some(HealthStatus { ok, last_check: chrono::Utc::now().to_rfc3339() });
-            }
-        })
-    }).collect();
-    // Don't wait — fire and forget, results used on next refresh
-    drop(health_futures);
+    // Health status is updated periodically by poll_loop — just read cached values
 
     let summaries: Vec<TargetSummary> = targets
         .iter()
@@ -268,21 +249,24 @@ async fn target_status(
     };
     // On-demand health check when viewing target detail
     let health_status = if let Some(ref url) = t.health_url {
-        let resolved = {
+        let pid = {
             let proc = t.process.lock().unwrap();
-            let pid = proc.as_ref().and_then(|p| p.pid());
-            drop(proc);
-            if let Some(port) = pid.and_then(|p| crate::process::detect_port(p)) {
-                url.replace("{port}", &port.to_string())
-            } else if let Some(port) = t.jvm_args.lock().unwrap().as_ref()
-                .and_then(|ja| ja.split_whitespace()
-                    .find(|a| a.starts_with("-Dserver.port="))
-                    .and_then(|a| a.split('=').nth(1)))
-            {
-                url.replace("{port}", port)
-            } else {
-                url.clone()
-            }
+            proc.as_ref().and_then(|p| p.pid())
+        };
+        let detected_port = if let Some(pid) = pid {
+            tokio::task::spawn_blocking(move || crate::process::detect_port(pid))
+                .await.unwrap_or(None)
+        } else { None };
+        let resolved = if let Some(port) = detected_port {
+            url.replace("{port}", &port.to_string())
+        } else if let Some(port) = t.jvm_args.lock().unwrap().as_ref()
+            .and_then(|ja| ja.split_whitespace()
+                .find(|a| a.starts_with("-Dserver.port="))
+                .and_then(|a| a.split('=').nth(1)))
+        {
+            url.replace("{port}", port)
+        } else {
+            url.clone()
         };
         let ok = crate::process::health_check(&resolved, 3).await;
         let hs = Some(HealthStatus { ok, last_check: chrono::Utc::now().to_rfc3339() });
@@ -325,7 +309,9 @@ async fn target_commits(
     Path(name): Path<String>,
 ) -> Result<Json<CommitsResponse>, StatusCode> {
     let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
-    git::recent_commits(&t.repo, 20)
+    let repo = t.repo.clone();
+    tokio::task::spawn_blocking(move || git::recent_commits(&repo, 20))
+        .await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map(|commits| Json(CommitsResponse { commits }))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
@@ -381,8 +367,13 @@ async fn target_rollback(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    git::checkout(&t.repo, &body.commit)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    {
+        let repo = t.repo.clone();
+        let commit = body.commit.clone();
+        tokio::task::spawn_blocking(move || git::checkout(&repo, &commit))
+            .await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     let artifact = t.artifact.as_deref();
     let run = t.run_cmd.as_deref();
@@ -458,11 +449,63 @@ async fn target_deploy(
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let branch = t.branch();
-    let remote = git::remote_head(&t.repo, &t.remote, &branch)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let repo = t.repo.clone();
+    let remote_name = t.remote.clone();
+    let is_dev = t.run_mode == "dev";
 
-    git::pull(&t.repo, &t.remote, &branch)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Try git remote check with timeout; fall back to cached/local head for dev mode
+    let remote = {
+        let repo = repo.clone();
+        let remote_name = remote_name.clone();
+        let branch = branch.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || {
+                git::remote_head(&repo, &remote_name, &branch)
+            })
+        ).await {
+            Ok(Ok(Ok(h))) if !h.is_empty() => h,
+            _ => {
+                // Fallback: use cached remote head or local head
+                let cached = t.cached_remote_head.lock().unwrap().clone();
+                let local = t.cached_local_head.lock().unwrap().clone();
+                let fallback = cached.or(local).unwrap_or_default();
+                if fallback.is_empty() {
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, "git remote unreachable and no cached commit".into()));
+                }
+                tracing::warn!("[{}] remote unreachable, using cached commit {fallback}", t.name);
+                fallback
+            }
+        }
+    };
+
+    // Try git pull with timeout; skip for dev mode or if remote unreachable
+    let pulled = {
+        let repo = repo.clone();
+        let remote_name = remote_name.clone();
+        let branch = branch.clone();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || {
+                git::pull(&repo, &remote_name, &branch)
+            })
+        ).await
+    };
+    match pulled {
+        Ok(Ok(Ok(()))) => {} // success
+        Ok(Ok(Err(e))) if is_dev => {
+            tracing::warn!("[{}] git pull failed in dev mode, continuing: {e}", t.name);
+        }
+        Ok(Ok(Err(e))) => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
+        _ if is_dev => {
+            tracing::warn!("[{}] git pull timed out in dev mode, continuing", t.name);
+        }
+        _ => {
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "git pull timed out".into()));
+        }
+    }
 
     let _ = s.tx.send(WsEvent {
         event: "deploy_started".into(),
@@ -819,32 +862,42 @@ async fn target_set_branch(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let output = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("refs/heads/{}", body.branch),
-        ])
-        .current_dir(&t.repo)
-        .output()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let repo = t.repo.clone();
+    let new_branch = body.branch.clone();
+    let local_exists = {
+        let repo = repo.clone();
+        let new_branch = new_branch.clone();
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--verify", &format!("refs/heads/{}", new_branch)])
+                .current_dir(&repo)
+                .output()
+        }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
-    if !output.status.success() {
+    if !local_exists.status.success() {
         // Create local tracking branch from remote
-        let result = std::process::Command::new("git")
-            .args(["branch", &body.branch, &format!("origin/{}", body.branch)])
-            .current_dir(&t.repo)
-            .output()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let repo2 = repo.clone();
+        let new_branch2 = new_branch.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("git")
+                .args(["branch", &new_branch2, &format!("origin/{}", new_branch2)])
+                .current_dir(&repo2)
+                .output()
+        }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         if !result.status.success() {
             let stderr = String::from_utf8_lossy(&result.stderr);
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("branch '{}' not found: {}", body.branch, stderr.trim()),
+                format!("branch '{}' not found: {}", new_branch, stderr.trim()),
             ));
         }
-        // Checkout with stash protection
-        git::checkout(&t.repo, &body.branch)
+        let repo3 = repo.clone();
+        let new_branch3 = new_branch.clone();
+        tokio::task::spawn_blocking(move || git::checkout(&repo3, &new_branch3))
+            .await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("checkout failed: {e}")))?
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("checkout failed: {e}")))?;
     }
 
@@ -885,11 +938,15 @@ async fn target_branches(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let output = std::process::Command::new("git")
-        .args(["branch", "-r"])
-        .current_dir(&t.repo)
-        .output()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let repo = t.repo.clone();
+    let current = t.branch();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("git")
+            .args(["branch", "-r"])
+            .current_dir(&repo)
+            .output()
+    }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let branches: Vec<String> = stdout
@@ -901,7 +958,7 @@ async fn target_branches(
 
     Ok(Json(BranchesResponse {
         branches,
-        current: t.branch(),
+        current,
     }))
 }
 
@@ -918,11 +975,27 @@ async fn target_fetch(
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
     let branch = t.branch();
-    let remote = git::remote_head(&t.repo, &t.remote, &branch)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let repo = t.repo.clone();
+    let remote_name = t.remote.clone();
+    let remote = {
+        let repo = repo.clone();
+        let remote_name = remote_name.clone();
+        let branch = branch.clone();
+        tokio::task::spawn_blocking(move || {
+            git::remote_head(&repo, &remote_name, &branch)
+        }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
 
-    git::pull(&t.repo, &t.remote, &branch)
+    {
+        let repo = repo.clone();
+        let remote_name = remote_name.clone();
+        let branch = branch.clone();
+        tokio::task::spawn_blocking(move || {
+            git::pull(&repo, &remote_name, &branch)
+        }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     let _ = s.tx.send(WsEvent {
         event: "targets_changed".into(),
@@ -1874,10 +1947,14 @@ async fn target_create(
     // Clone git repo if remote provided and directory is empty
     if let Some(ref git_url) = body.git_remote {
         if repo.read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
-            let output = std::process::Command::new("git")
-                .args(["clone", git_url, &body.repo.trim()])
-                .output()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let git_url = git_url.clone();
+            let repo_path = body.repo.trim().to_string();
+            let output = tokio::task::spawn_blocking(move || {
+                std::process::Command::new("git")
+                    .args(["clone", &git_url, &repo_path])
+                    .output()
+            }).await.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("git clone failed: {}", stderr.trim())));
