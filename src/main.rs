@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
     // Build per-target state
     let mut target_map = HashMap::new();
     for entry in &targets {
-        let proj = project::ProjectConfig::load(&entry.repo, entry.profile.as_deref())
+        let proj = project::ProjectConfig::load(&entry.name, &entry.repo)
             .unwrap_or_default()
             .unwrap_or_default();
 

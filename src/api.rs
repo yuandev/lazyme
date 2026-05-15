@@ -539,7 +539,7 @@ pub async fn build_and_cache(
         (true, None, None)
     } else {
         // Resolve build command placeholders
-        let resolved_build = crate::project::ProjectConfig::load(repo, None)
+        let resolved_build = crate::project::ProjectConfig::load(target_name, repo)
             .ok()
             .flatten()
             .map(|c| {
@@ -836,7 +836,7 @@ async fn target_set_branch(
     *t.branch.lock().unwrap() = body.branch.clone();
 
     // Persist to project config
-    if let Err(e) = crate::project::ProjectConfig::save_branch(&t.repo, t.profile.as_deref(), &body.branch) {
+    if let Err(e) = crate::project::ProjectConfig::save_branch(&t.name, &body.branch) {
         tracing::warn!("Failed to save branch to config: {e}");
     }
 
@@ -1109,7 +1109,7 @@ async fn reload_config(
             if let Some(t) = s.targets.read().unwrap().get(&entry.name) {
                 // Reload project config for existing target
                 if let Ok(Some(proj)) =
-                    crate::project::ProjectConfig::load(&entry.repo, entry.profile.as_deref())
+                    crate::project::ProjectConfig::load(&entry.name, &entry.repo)
                 {
                     if let Some(b) = proj.watch.branch {
                         *t.branch.lock().unwrap() = b;
@@ -1277,15 +1277,15 @@ async fn target_get_config(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let config = crate::project::ProjectConfig::read_config_raw(&t.repo, t.profile.as_deref())
+    let config = crate::project::ProjectConfig::read_config_raw(&t.name)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
-    let path = crate::project::ProjectConfig::config_path(&t.repo, t.profile.as_deref());
+    let path = crate::project::ProjectConfig::config_path(&t.name);
 
     Ok(Json(serde_json::json!({
         "target": name,
-        "path": path.display().to_string(),
+        "path": path,
         "content": config,
     })))
 }
@@ -1302,7 +1302,7 @@ async fn target_put_config(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    crate::project::ProjectConfig::save_config(&t.repo, t.profile.as_deref(), &body.content)
+    crate::project::ProjectConfig::save_config(&t.name, &body.content)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(serde_json::json!({"status": "ok", "target": name})))
@@ -1310,8 +1310,8 @@ async fn target_put_config(
 
 // ── Maven settings file read/write ──
 
-fn resolve_maven_settings_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
-    crate::project::ProjectConfig::load(repo, profile.map(|s| s.as_str()))
+fn resolve_maven_settings_path(name: &str, repo: &PathBuf) -> Option<String> {
+    crate::project::ProjectConfig::load(name, repo)
         .ok()
         .flatten()
         .and_then(|c| c.build.maven_settings)
@@ -1328,7 +1328,7 @@ async fn target_get_maven_settings(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let settings_path = resolve_maven_settings_path(&t.repo, t.profile.as_ref());
+    let settings_path = resolve_maven_settings_path(&t.name, &t.repo);
 
     let (path, content) = match settings_path {
         Some(p) => {
@@ -1358,7 +1358,7 @@ async fn target_put_maven_settings(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let settings_path = resolve_maven_settings_path(&t.repo, t.profile.as_ref())
+    let settings_path = resolve_maven_settings_path(&t.name, &t.repo)
         .ok_or((StatusCode::BAD_REQUEST, "maven_settings not configured in .deployd/config.toml".into()))?;
 
     if let Some(parent) = std::path::Path::new(&settings_path).parent() {
@@ -1394,7 +1394,7 @@ async fn target_get_vite_config(
 
     Ok(Json(serde_json::json!({
         "target": name,
-        "path": path.display().to_string(),
+        "path": path,
         "content": content,
     })))
 }
@@ -1523,8 +1523,8 @@ async fn target_put_env(
 
 // ── Local repo path ──
 
-fn resolve_local_repo_path(repo: &PathBuf, profile: Option<&String>) -> Option<String> {
-    crate::project::ProjectConfig::load(repo, profile.map(|s| s.as_str()))
+fn resolve_local_repo_path(name: &str, repo: &PathBuf) -> Option<String> {
+    crate::project::ProjectConfig::load(name, repo)
         .ok()
         .flatten()
         .and_then(|c| c.build.local_repo)
@@ -1541,7 +1541,7 @@ async fn target_get_local_repo(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    let path = resolve_local_repo_path(&t.repo, t.profile.as_ref()).unwrap_or_default();
+    let path = resolve_local_repo_path(&t.name, &t.repo).unwrap_or_default();
 
     Ok(Json(serde_json::json!({
         "target": name,
@@ -1735,9 +1735,7 @@ async fn target_create(
         }
     }
 
-    // Write .deployd/config.toml
-    let deploy_dir = repo.join(".deployd");
-    std::fs::create_dir_all(&deploy_dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Write config to ~/.config/lazyme/targets/{name}.toml
     let mut config_toml = String::from("[watch]\n");
     config_toml.push_str(&format!("branch = \"{}\"\n", body.branch.as_deref().unwrap_or("main")));
     if let Some(ref cmd) = body.build_cmd {
@@ -1760,8 +1758,8 @@ async fn target_create(
             for (k, v) in envs { config_toml.push_str(&format!("\"{}\" = \"{}\"\n", k, v)); }
         }
     }
-    let config_path = deploy_dir.join("config.toml");
-    std::fs::write(&config_path, config_toml).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::project::ProjectConfig::save_config(&name, &config_toml)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Append to registry
     let entry = crate::registry::TargetEntry {
