@@ -35,12 +35,27 @@ pub fn short_hash(repo: &Path, full_hash: &str) -> Result<String> {
 
 pub fn pull(repo: &Path, remote: &str, branch: &str) -> Result<()> {
     git(&["fetch", remote], repo)?;  // fetch all remote refs
-    git(&["checkout", &format!("{remote}/{branch}")], repo)?;
+    force_checkout(repo, &format!("{remote}/{branch}"))?;
     Ok(())
 }
 
 pub fn checkout(repo: &Path, commit: &str) -> Result<()> {
-    git(&["checkout", commit], repo)?;
+    force_checkout(repo, commit)?;
+    Ok(())
+}
+
+/// Checkout with dirty file protection: stash → checkout → pop stash
+fn force_checkout(repo: &Path, target: &str) -> Result<()> {
+    let has_changes = !git(&["status", "--porcelain"], repo)
+        .unwrap_or_default().is_empty();
+    if has_changes {
+        let _ = git(&["stash", "push", "-m", "lazyme auto-stash before checkout"], repo);
+    }
+    let r = git(&["checkout", target], repo);
+    if has_changes {
+        let _ = git(&["stash", "pop"], repo);
+    }
+    r?;
     Ok(())
 }
 

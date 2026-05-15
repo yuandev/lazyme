@@ -812,25 +812,22 @@ async fn target_set_branch(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     if !output.status.success() {
-        // Try to create from remote branch
-        let checkout = std::process::Command::new("git")
-            .args([
-                "checkout",
-                "-b",
-                &body.branch,
-                &format!("origin/{}", body.branch),
-            ])
+        // Create local tracking branch from remote
+        let result = std::process::Command::new("git")
+            .args(["branch", &body.branch, &format!("origin/{}", body.branch)])
             .current_dir(&t.repo)
             .output()
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if !checkout.status.success() {
-            let stderr = String::from_utf8_lossy(&checkout.stderr);
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!("branch '{}' not found: {}", body.branch, stderr.trim()),
             ));
         }
+        // Checkout with stash protection
+        git::checkout(&t.repo, &body.branch)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("checkout failed: {e}")))?;
     }
 
     *t.branch.lock().unwrap() = body.branch.clone();
