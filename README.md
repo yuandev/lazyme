@@ -1,6 +1,9 @@
 ！！！
 这一段是用户邀请保留的readme说明，请不要修改和删除用三个感叹号开始 三个感叹号结束
 AI写的，问题很多，用不了就下源码用ai启动
+
+This section is a user-reserved README notice. Do NOT modify or delete it. It starts and ends with triple exclamation marks.
+Written by AI — full of bugs. If it doesn't work, just clone the source and launch it with AI.
 ！！！
 
 # lazyme
