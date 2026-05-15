@@ -88,7 +88,7 @@ function AppInner() {
 
   const toggleLang = () => setLang(lang === 'en' ? 'zh' : 'en');
 
-  const isOnline = (t: TargetSummary) => t.process_running && t.health_ok !== false;
+  const isOnline = (t: TargetSummary) => t.health_ok === true;
 
   return (
     <div style={S.container}>
@@ -346,7 +346,7 @@ function TargetDetail({ name }: { name: string }) {
 
   const viewLog = async (hash: string) => { setLogHash(hash); setLog(await fetchTargetLogs(name, hash) || t.noLog); };
   const handleRollback = async (commit: string) => { setLoading(true); await rollbackTarget(name, commit); await refresh(); setLoading(false); };
-  const isOnline = status && status.process_running && status.health_status?.ok !== false;
+  const isOnline = status && status.health_status?.ok === true;
   const tabs = [
     { key: 'status' as const, label: t.status, icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg> },
     { key: 'commits' as const, label: t.commits, icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="5" r="2"/><path d="M12 7v5"/><circle cx="12" cy="12" r="2"/><path d="M12 14v5"/><circle cx="12" cy="19" r="2"/></svg> },
