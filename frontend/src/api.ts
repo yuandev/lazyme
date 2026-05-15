@@ -244,6 +244,11 @@ export async function fetchEnv(name: string): Promise<EnvResponse> {
   return res.json();
 }
 
+export async function stopTarget(name: string): Promise<{ status: string }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/stop`, { method: 'POST' });
+  return res.json();
+}
+
 export async function autoDeployToggle(name: string): Promise<{ status: string; auto_deploy_paused: boolean }> {
   const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/auto-deploy`, { method: 'POST' });
   return res.json();

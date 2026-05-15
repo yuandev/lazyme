@@ -6,7 +6,7 @@ import {
   deleteTarget, renameTarget, createTarget,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
   fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
-  restartServer, autoDeployToggle,
+  restartServer, autoDeployToggle, stopTarget,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 import { I18nProvider, useI18n, tf } from './i18n';
@@ -510,6 +510,10 @@ function TargetDetail({ name }: { name: string }) {
             </button>
             <button onClick={async () => { await autoDeployToggle(name); await refresh(); }} style={{ ...S.primaryBtn, background: status.auto_deploy_paused ? '#064e3b' : '#451a03', color: status.auto_deploy_paused ? '#6ee7b7' : '#fbbf24', border: `1px solid ${status.auto_deploy_paused ? '#065f46' : '#78350f'}` }}>
               {status.auto_deploy_paused ? '▶ ' + t.resume : '⏸ ' + t.pause}
+            </button>
+            <button onClick={async () => { await stopTarget(name); await refresh(); }} style={{ ...S.primaryBtn, background: '#1a1a1a', color: '#f87171', border: '1px solid #450a0a' }}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
+              {' '}stop
             </button>
             {status.auto_deploy_paused && <span style={{ fontSize: 13, color: '#f59e0b', alignSelf: 'center' }}>{t.autoDeployPaused}</span>}
           </div>

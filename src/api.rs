@@ -1147,6 +1147,23 @@ async fn reload_config(
     }))
 }
 
+// ── Stop service ──
+
+/// POST /api/targets/{name}/stop — stop running process
+async fn target_stop(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s.targets.read().unwrap().get(&name).cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+    let mut proc = t.process.lock().unwrap();
+    if let Some(ref mut p) = *proc { p.kill(); }
+    *proc = None; drop(proc);
+    *t.health_status.lock().unwrap() = None;
+    let _ = s.tx.send(WsEvent { event: "targets_changed".into(), target: name.clone(), commit: None, message: None });
+    Ok(Json(serde_json::json!({"status": "ok", "stopped": true})))
+}
+
 // ── Auto-deploy toggle ──
 
 /// POST /api/targets/{name}/auto-deploy — toggle auto-deploy pause/resume
@@ -1865,6 +1882,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
         .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
         .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
+        .route("/api/targets/{name}/stop", post(target_stop))
         .route("/api/targets/{name}/auto-deploy", post(target_auto_deploy))
         .route("/api/targets/{name}/env", get(target_get_env).put(target_put_env))
         .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
