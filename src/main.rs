@@ -109,6 +109,8 @@ async fn main() -> anyhow::Result<()> {
             auto_deploy_paused: Mutex::new(false),
             health_status: Mutex::new(None),
             auto_restart,
+            cached_local_head: Mutex::new(None),
+            cached_remote_head: Mutex::new(None),
         });
 
         let branch_val = ts.branch();
@@ -211,8 +213,16 @@ pub async fn poll_loop(
 
         let branch = target.branch();
 
+        // Cache local head
+        if let Ok(lh) = git::local_head(&target.repo) {
+            *target.cached_local_head.lock().unwrap() = Some(lh);
+        }
+
         let remote = match git::remote_head(&target.repo, &target.remote, &branch) {
-            Ok(h) => h,
+            Ok(h) => {
+                *target.cached_remote_head.lock().unwrap() = Some(h.clone());
+                h
+            }
             Err(e) => {
                 warn!("[{}] remote check failed: {e}", target.name);
                 continue;

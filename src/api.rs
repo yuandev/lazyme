@@ -50,6 +50,8 @@ pub struct TargetState {
     pub auto_deploy_paused: Mutex<bool>,
     pub health_status: Mutex<Option<HealthStatus>>,
     pub auto_restart: bool,
+    pub cached_remote_head: Mutex<Option<String>>,
+    pub cached_local_head: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,8 +212,8 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
                 repo: t.repo.display().to_string(),
                 branch: t.branch(),
                 deployed: st.current().clone(),
-                local_commit: git::local_head(&t.repo).ok(),
-                remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch()).ok(),
+                local_commit: t.cached_local_head.lock().unwrap().clone(),
+                remote_commit: t.cached_remote_head.lock().unwrap().clone(),
                 process_running: running,
                 health_url: t.health_url.clone(),
                 group: t.group.clone(),
@@ -231,6 +233,8 @@ async fn target_status(
 ) -> Result<Json<StatusResponse>, StatusCode> {
     let t = s.targets.read().unwrap().get(&name).cloned().ok_or(StatusCode::NOT_FOUND)?;
     let deployed = { t.state.lock().unwrap().current().clone() };
+    let cached_local = t.cached_local_head.lock().unwrap().clone();
+    let cached_remote = t.cached_remote_head.lock().unwrap().clone();
     let (running, pid, uptime) = {
         let mut proc = t.process.lock().unwrap();
         if let Some(ref mut p) = *proc {
@@ -275,8 +279,8 @@ async fn target_status(
         repo: t.repo.display().to_string(),
         branch: t.branch(),
         deployed,
-        local_commit: git::local_head(&t.repo).ok(),
-        remote_commit: git::remote_head(&t.repo, &t.remote, &t.branch()).ok(),
+        local_commit: cached_local.clone(),
+        remote_commit: cached_remote.clone(),
         interval_secs: s.interval,
         process_running: running,
         health_url: t.health_url.clone(),
@@ -1083,6 +1087,8 @@ async fn target_clone(
         group: body.group.clone().or_else(|| source.group.clone()),
         auto_deploy_paused: Mutex::new(false),
         health_status: Mutex::new(None),
+        cached_local_head: Mutex::new(None),
+        cached_remote_head: Mutex::new(None),
         auto_restart: source.auto_restart,
     });
 
@@ -1813,6 +1819,8 @@ async fn target_create(
         group: body.group.clone(),
         auto_deploy_paused: Mutex::new(false),
         health_status: Mutex::new(None),
+        cached_local_head: Mutex::new(None),
+        cached_remote_head: Mutex::new(None),
         auto_restart: false,
     });
 
