@@ -444,6 +444,8 @@ function TargetDetail({ name }: { name: string }) {
   const [log, setLog] = useState('');
   const [logHash, setLogHash] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [stopOk, setStopOk] = useState(false);
   const [branches, setBranches] = useState<string[]>([]);
   const [branchSel, setBranchSel] = useState('');
   const [switchingBranch, setSwitchingBranch] = useState(false);
@@ -511,9 +513,30 @@ function TargetDetail({ name }: { name: string }) {
             <button onClick={async () => { await autoDeployToggle(name); await refresh(); }} style={{ ...S.primaryBtn, background: status.auto_deploy_paused ? '#064e3b' : '#451a03', color: status.auto_deploy_paused ? '#6ee7b7' : '#fbbf24', border: `1px solid ${status.auto_deploy_paused ? '#065f46' : '#78350f'}` }}>
               {status.auto_deploy_paused ? '▶ ' + t.resume : '⏸ ' + t.pause}
             </button>
-            <button onClick={async () => { await stopTarget(name); await refresh(); }} style={{ ...S.primaryBtn, background: '#1a1a1a', color: '#f87171', border: '1px solid #450a0a' }}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="3"/></svg>
-              {' '}stop
+            <button
+              onClick={async () => {
+                setStopping(true);
+                await stopTarget(name);
+                setStopping(false); setStopOk(true);
+                await refresh();
+                setTimeout(() => setStopOk(false), 2000);
+              }}
+              disabled={stopping || stopOk || !status.process_running}
+              style={{
+                ...S.primaryBtn,
+                opacity: (!status.process_running || stopping) ? 0.35 : 1,
+                background: stopOk ? '#052e16' : stopping ? '#451a03' : '#1a1a1a',
+                color: stopOk ? '#4ade80' : stopping ? '#fbbf24' : '#f87171',
+                border: `1px solid ${stopOk ? '#065f46' : stopping ? '#78350f' : '#450a0a'}`,
+              }}
+            >
+              {stopping ? (
+                <><span style={{ display: 'inline-block', width: 12, height: 12, border: '2px solid #fbbf24', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} /> stopping</>
+              ) : stopOk ? (
+                '✓ stopped'
+              ) : (
+                <><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="3"/></svg> stop</>
+              )}
             </button>
             {status.auto_deploy_paused && <span style={{ fontSize: 13, color: '#f59e0b', alignSelf: 'center' }}>{t.autoDeployPaused}</span>}
           </div>
