@@ -200,7 +200,29 @@ async fn handle_socket(mut socket: WebSocket, state: SharedState) {
 /// GET /api/targets
 async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> {
     let targets = s.targets.read().unwrap();
-    let mut summaries: Vec<TargetSummary> = targets
+
+    // Quick parallel health checks — online services respond <1ms
+    let health_futures: Vec<_> = targets.iter().map(|(_, t)| {
+        let t = t.clone();
+        tokio::spawn(async move {
+            let url = t.health_url.clone();
+            let jvm_args = t.jvm_args.lock().unwrap().clone();
+            if let Some(ref url) = url {
+                let resolved = jvm_args.as_ref()
+                    .and_then(|ja| ja.split_whitespace()
+                        .find(|a| a.starts_with("-Dserver.port="))
+                        .and_then(|a| a.split('=').nth(1)))
+                    .map(|p| url.replace("{port}", p))
+                    .unwrap_or_else(|| url.clone());
+                let ok = process::health_check(&resolved, 2).await;
+                *t.health_status.lock().unwrap() = Some(HealthStatus { ok, last_check: chrono::Utc::now().to_rfc3339() });
+            }
+        })
+    }).collect();
+    // Don't wait — fire and forget, results used on next refresh
+    drop(health_futures);
+
+    let summaries: Vec<TargetSummary> = targets
         .iter()
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
@@ -222,7 +244,6 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
             }
         })
         .collect();
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
     Json(TargetListResponse { targets: summaries })
 }
 
