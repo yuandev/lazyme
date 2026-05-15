@@ -515,6 +515,9 @@ pub async fn build_and_cache(
                 if let Some(ref s) = c.build.maven_settings {
                     cmd = cmd.replace("{maven_settings}", s);
                 }
+                if let Some(ref s) = c.build.local_repo {
+                    cmd = cmd.replace("{local_repo}", s);
+                }
                 cmd
             })
             .unwrap_or_else(|| build_cmd.to_string());
