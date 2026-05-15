@@ -13,12 +13,17 @@ impl ManagedProcess {
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
         let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
         let mut c = Command::new(shell);
-        c.args([flag, cmd]).current_dir(repo);
-        if let Some(envs) = envs {
-            for (k, v) in envs {
-                c.env(k, v);
-            }
-        }
+        // Prepend env vars via `env` to handle dotted names like spring.application.group
+        let resolved = if let Some(envs) = envs {
+            let prefix: String = envs.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if prefix.is_empty() { cmd.to_string() } else { format!("env {prefix} {cmd}") }
+        } else {
+            cmd.to_string()
+        };
+        c.args([flag, &resolved]).current_dir(repo);
         let child = c.spawn()?;
         Ok(Self { child: Some(child), started_at: Some(Instant::now()) })
     }
@@ -33,7 +38,19 @@ impl ManagedProcess {
 
     pub fn kill(&mut self) {
         if let Some(ref mut child) = self.child {
-            let _ = child.kill();
+            // Kill process group to ensure subprocesses (e.g. java) die too
+            #[cfg(unix)]
+            unsafe {
+                let pid = child.id() as i32;
+                libc::killpg(pid, libc::SIGTERM);
+                // Give a moment for graceful shutdown, then force
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                libc::killpg(pid, libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = child.kill();
+            }
             let _ = child.wait();
         }
         self.child = None;

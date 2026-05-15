@@ -288,6 +288,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "libc",
  "mime_guess",
  "reqwest",
  "rust-embed",
