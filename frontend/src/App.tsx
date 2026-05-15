@@ -233,193 +233,58 @@ function Spinner({ text }: { text: string }) {
 
 function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const { t } = useI18n();
-  const [step, setStep] = useState(0);
-  const [tech, setTech] = useState<'java' | 'node' | 'other'>('java');
   const [name, setName] = useState('');
-  const [label, setLabel] = useState('');
   const [repo, setRepo] = useState('');
-  const [branch, setBranch] = useState('main');
-  const [group, setGroup] = useState('');
   const [gitRemote, setGitRemote] = useState('');
-  const [buildCmd, setBuildCmd] = useState('');
-  const [artifact, setArtifact] = useState('');
-  const [mavenSettings, setMavenSettings] = useState('');
-  const [localRepo, setLocalRepo] = useState('');
-  const [runCmd, setRunCmd] = useState('');
-  const [healthUrl, setHealthUrl] = useState('');
-  const [runMode, setRunMode] = useState('deploy');
-  const [jvmArgs, setJvmArgs] = useState('');
-  const [envsText, setEnvsText] = useState('');
+  const [branch, setBranch] = useState('main');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
-
-  // Update presets when tech changes
-  const selectTech = (t: 'java' | 'node' | 'other') => {
-    setTech(t);
-    if (t === 'java') {
-      setBuildCmd('mvn package -s {maven_settings} -Dmaven.repo.local={local_repo} -DskipTests');
-      setRunCmd('java {jvm_args} -jar {artifact}');
-      setJvmArgs('-Dserver.port=8080 -Xms256m -Xmx512m');
-      setHealthUrl('http://localhost:{port}/monitor/health');
-      setArtifact('target/app.jar');
-      setMavenSettings('/home/yuan/maven/settings.xml');
-      setLocalRepo('/home/yuan/maven/repository');
-    } else if (t === 'node') {
-      setBuildCmd('npm run build');
-      setRunCmd('npm run dev');
-      setArtifact('dist');
-      setHealthUrl('http://localhost:{port}');
-      setRunMode('dev');
-      setJvmArgs('');
-      setMavenSettings(''); setLocalRepo('');
-    } else {
-      setBuildCmd(''); setRunCmd(''); setArtifact('');
-      setHealthUrl(''); setJvmArgs('');
-      setMavenSettings(''); setLocalRepo('');
-    }
-  };
 
   const doCreate = async () => {
     if (!name || !repo) { setErr('Name and repo path are required'); return; }
     setSaving(true); setErr('');
-    const envs: Record<string, string> = {};
-    envsText.split('\n').forEach(line => { const idx = line.indexOf('='); if (idx > 0) envs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim(); });
     try {
       await createTarget({
-        name, label: label || name, repo, branch: branch || 'main', group: group || undefined, git_remote: gitRemote || undefined,
-        build_cmd: buildCmd || undefined, artifact: artifact || undefined, run_cmd: runCmd || undefined,
-        health_url: healthUrl || undefined, run_mode: runMode || undefined, jvm_args: jvmArgs || undefined,
-        maven_settings: mavenSettings || undefined, local_repo: localRepo || undefined,
-        envs: Object.keys(envs).length > 0 ? envs : undefined,
+        name, repo, branch: branch || 'main',
+        git_remote: gitRemote || undefined,
       });
       onCreated();
     } catch (e: any) { setErr(e.message || 'Create failed'); }
     setSaving(false);
   };
 
-  const f = (l: string, v: string, set: (v: string) => void, ph?: string) => (
-    <div style={{ marginBottom: 10 }}>
-      <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{l}</label>
-      <input value={v} onChange={e => set(e.target.value)} style={S.inputField} placeholder={ph || ''} />
-    </div>
-  );
-
-  const steps = 4;
-  const next = () => setStep(s => Math.min(s + 1, steps));
-  const prev = () => setStep(s => Math.max(s - 1, 0));
-  const techCard = (type: 'java' | 'node' | 'other', icon: string, label: string, desc: string) => (
-    <button onClick={() => selectTech(type)} style={{ ...S.techCard, borderColor: tech === type ? '#3b82f6' : '#1f1f2a', background: tech === type ? '#0c1929' : '#0c0c10' }}>
-      <span style={{ fontSize: 24 }}>{icon}</span>
-      <div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#d1d5db' }}>{label}</div>
-        <div style={{ fontSize: 11, color: '#6b7280', marginTop: 2 }}>{desc}</div>
-      </div>
-    </button>
-  );
-
   return (
     <div style={S.modalOverlay} onClick={onClose}>
-      <div style={{ ...S.modal, maxWidth: 520, maxHeight: '85vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+      <div style={{ ...S.modal, maxWidth: 440 }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
           <h3 style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9', margin: 0 }}>{t.newTarget}</h3>
-          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-            <span style={{ fontSize: 11, color: '#6b7280' }}>{step + 1}/{steps + 1}</span>
-            <button onClick={onClose} style={{ ...S.smallBtn, background: '#1f1f2a', color: '#9ca3af' }}>✕</button>
-          </div>
+          <button onClick={onClose} style={{ ...S.smallBtn, background: '#1f1f2a', color: '#9ca3af' }}>✕</button>
         </div>
 
-        {/* Progress dots */}
-        <div style={{ display: 'flex', gap: 4, marginBottom: 20 }}>
-          {Array.from({ length: steps + 1 }).map((_, i) => (
-            <div key={i} style={{ flex: 1, height: 3, borderRadius: 2, background: i <= step ? '#3b82f6' : '#1f1f2a', transition: 'background 0.2s' }} />
-          ))}
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.newName || 'Name *'}</label>
+          <input value={name} onChange={e => setName(e.target.value)} style={S.inputField} placeholder="my-service" autoFocus />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.repoPath}</label>
+          <input value={repo} onChange={e => setRepo(e.target.value)} style={S.inputField} placeholder="/home/yuan/projects/my-service" />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.gitRemote}</label>
+          <input value={gitRemote} onChange={e => setGitRemote(e.target.value)} style={S.inputField} placeholder="git@host:group/repo.git (optional)" />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.branchLabel}</label>
+          <input value={branch} onChange={e => setBranch(e.target.value)} style={S.inputField} placeholder="main" />
+        </div>
+        <div style={{ fontSize: 12, color: '#6b7280', marginBottom: 16, background: '#111118', padding: '8px 12px', borderRadius: 6, border: '1px solid #1a1a24' }}>
+          💡 Build, run commands, health URL, env vars — all auto-detected from your project files (<code>pom.xml</code>, <code>package.json</code>, etc). Edit later in Config tab if needed.
         </div>
 
-        {/* Step 0: Tech Type */}
-        {step === 0 && <div>
-          <div style={{ fontSize: 13, color: '#9ca3af', marginBottom: 12 }}>Select project type — presets will be applied automatically.</div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
-            {techCard('java', '☕', 'Java / Spring', 'Maven, JVM args, health check')}
-            {techCard('node', '⚡', 'Node.js / Vite', 'npm scripts, dev mode, HMR')}
-            {techCard('other', '🔧', 'Other', 'Custom shell commands')}
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-            <button onClick={next} style={S.primaryBtn}>Next →</button>
-          </div>
-        </div>}
-
-        {/* Step 1: Project info */}
-        {step === 1 && <div>
-          {f(t.newName || 'Name *', name, setName, 'my-service')}
-          {f('Label', label, setLabel, name || 'My Service')}
-          {f(t.repoPath, repo, setRepo, '/home/yuan/projects/my-service')}
-          {f(t.gitRemote, gitRemote, setGitRemote, 'git@host:group/repo.git')}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 1 }}>{f(t.branchLabel, branch, setBranch, 'main')}</div>
-            <div style={{ flex: 1 }}>{f('Group', group, setGroup, 'backend')}</div>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10 }}>
-            <button onClick={prev} style={S.smallBtn}>← Back</button>
-            <button onClick={next} style={S.primaryBtn}>Next →</button>
-          </div>
-        </div>}
-
-        {/* Step 2: Build */}
-        {step === 2 && <div>
-          {tech === 'java' && <>
-            {f('Build command', buildCmd, setBuildCmd, 'mvn package -DskipTests')}
-            {f('Artifact', artifact, setArtifact, 'target/app.jar')}
-            {f('Maven settings', mavenSettings, setMavenSettings, '/path/to/settings.xml')}
-            {f('Local Maven repo', localRepo, setLocalRepo, '/path/to/maven/repo')}
-          </>}
-          {tech === 'node' && <>
-            {f('Build command', buildCmd, setBuildCmd, 'npm run build')}
-            {f('Artifact', artifact, setArtifact, 'dist')}
-          </>}
-          {tech === 'other' && <>
-            {f('Build command', buildCmd, setBuildCmd, 'make build')}
-            {f('Artifact', artifact, setArtifact, 'build/output')}
-          </>}
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10 }}>
-            <button onClick={prev} style={S.smallBtn}>← Back</button>
-            <button onClick={next} style={S.primaryBtn}>Next →</button>
-          </div>
-        </div>}
-
-        {/* Step 3: Run */}
-        {step === 3 && <div>
-          {f('Run command', runCmd, setRunCmd, tech === 'java' ? 'java {jvm_args} -jar {artifact}' : tech === 'node' ? 'npm run dev' : './start.sh')}
-          {f(t.health, healthUrl, setHealthUrl, 'http://localhost:{port}/health')}
-          <div style={{ display: 'flex', gap: 10 }}>
-            <div style={{ flex: 1 }}>
-              <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.mode}</label>
-              <select value={runMode} onChange={e => setRunMode(e.target.value)} style={{ ...S.select, width: '100%', maxWidth: '100%' }}>
-                <option value="deploy">deploy</option>
-                <option value="dev">dev</option>
-              </select>
-            </div>
-            <div style={{ flex: 1 }}>{tech === 'java' && f(t.jvmArgs, jvmArgs, setJvmArgs, '-Xmx512m -Dserver.port=8080')}</div>
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 10 }}>
-            <button onClick={prev} style={S.smallBtn}>← Back</button>
-            <button onClick={next} style={S.primaryBtn}>Next →</button>
-          </div>
-        </div>}
-
-        {/* Step 4: Env vars + Create */}
-        {step === 4 && <div>
-          <div style={{ marginBottom: 10 }}>
-            <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.envVars} ({tech === 'java' ? 'e.g. spring.application.group' : tech === 'node' ? 'e.g. NODE_ENV' : 'optional'})</label>
-            <textarea value={envsText} onChange={e => setEnvsText(e.target.value)} style={{ ...S.textarea, minHeight: 100 }} placeholder="KEY=value&#10;ANOTHER_KEY=value2" spellCheck={false} />
-          </div>
-          {err && <div style={{ color: '#f87171', fontSize: 13, marginBottom: 10 }}>{err}</div>}
-          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-            <button onClick={prev} style={S.smallBtn}>← Back</button>
-            <button onClick={doCreate} disabled={saving} style={{ ...S.primaryBtn, opacity: saving ? 0.5 : 1 }}>
-              {saving ? t.saving : t.createTarget}
-            </button>
-          </div>
-        </div>}
+        {err && <div style={{ color: '#f87171', fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <button onClick={doCreate} disabled={saving} style={{ ...S.primaryBtn, width: '100%', justifyContent: 'center', opacity: saving ? 0.5 : 1 }}>
+          {saving ? t.saving : t.createTarget}
+        </button>
       </div>
     </div>
   );

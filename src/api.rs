@@ -1766,6 +1766,100 @@ struct CreateTargetBody {
     envs: Option<HashMap<String, String>>,
 }
 
+struct DetectedProject {
+    build_cmd: String,
+    artifact: Option<String>,
+    run_cmd: Option<String>,
+    health_url: Option<String>,
+    run_mode: String,
+    jvm_args: Option<String>,
+    maven_settings: Option<String>,
+    local_repo: Option<String>,
+    envs: HashMap<String, String>,
+}
+
+fn detect_project(repo: &std::path::Path) -> DetectedProject {
+    let has = |f: &str| repo.join(f).exists();
+    let default = || DetectedProject {
+        build_cmd: String::new(), artifact: None, run_cmd: None, health_url: None,
+        run_mode: "deploy".into(), jvm_args: None, maven_settings: None, local_repo: None,
+        envs: HashMap::new(),
+    };
+
+    // Java / Maven
+    if has("pom.xml") {
+        // Try to guess artifact name from pom.xml or directory structure
+        let artifact = find_java_artifact(repo);
+        return DetectedProject {
+            build_cmd: "mvn package -s {maven_settings} -Dmaven.repo.local={local_repo} -DskipTests".into(),
+            artifact,
+            run_cmd: Some("java {jvm_args} -jar {artifact}".into()),
+            health_url: Some("http://localhost:{port}/monitor/health".into()),
+            run_mode: "deploy".into(),
+            jvm_args: Some("-Dserver.port=8080 -Xms256m -Xmx512m -Xss512K".into()),
+            maven_settings: Some("/home/yuan/maven/settings_songguo.xml".into()),
+            local_repo: Some("/home/yuan/maven/repository".into()),
+            envs: HashMap::new(),
+        };
+    }
+    // Node / npm
+    if has("package.json") {
+        return DetectedProject {
+            build_cmd: "npm run build".into(),
+            artifact: Some("dist".into()),
+            run_cmd: Some("npm run dev".into()),
+            health_url: Some("http://localhost:{port}".into()),
+            run_mode: "dev".into(),
+            jvm_args: None, maven_settings: None, local_repo: None,
+            envs: HashMap::new(),
+        };
+    }
+    // Rust
+    if has("Cargo.toml") {
+        return DetectedProject {
+            build_cmd: "cargo build --release".into(),
+            artifact: Some("target/release/".to_string() + &guess_cargo_binary(repo)),
+            run_cmd: Some("./{artifact}".into()),
+            health_url: Some("http://localhost:{port}/health".into()),
+            run_mode: "deploy".into(),
+            jvm_args: None, maven_settings: None, local_repo: None,
+            envs: HashMap::new(),
+        };
+    }
+    // Python
+    if has("requirements.txt") || has("pyproject.toml") {
+        return DetectedProject {
+            build_cmd: String::new(),
+            artifact: None,
+            run_cmd: Some("python -m uvicorn main:app --host 0.0.0.0 --port 8000".into()),
+            health_url: Some("http://localhost:8000/health".into()),
+            run_mode: "dev".into(),
+            jvm_args: None, maven_settings: None, local_repo: None,
+            envs: HashMap::new(),
+        };
+    }
+    default()
+}
+
+fn find_java_artifact(repo: &std::path::Path) -> Option<String> {
+    // Look for spring-boot-maven-plugin or jar packaging under target/
+    for entry in std::fs::read_dir(repo).ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with("-starter") && entry.path().is_dir() {
+            return Some(format!("{}/target/{}-*.jar", name, name));
+        }
+    }
+    None
+}
+
+fn guess_cargo_binary(repo: &std::path::Path) -> String {
+    // Use directory name as binary name
+    repo.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app")
+        .to_string()
+}
+
 /// POST /api/targets — create a new target
 async fn target_create(
     State(s): State<SharedState>,
@@ -1798,28 +1892,40 @@ async fn target_create(
         }
     }
 
-    // Write config to ~/.config/lazyme/targets/{name}.toml
-    let mut config_toml = String::from("[watch]\n");
-    config_toml.push_str(&format!("branch = \"{}\"\n", body.branch.as_deref().unwrap_or("main")));
-    if let Some(ref cmd) = body.build_cmd {
+    // Auto-detect project type from repo files
+    let detected = detect_project(&repo);
+
+    // Resolve config — user-provided values override auto-detected defaults
+    let build_cmd = body.build_cmd.unwrap_or_else(|| detected.build_cmd.clone());
+    let artifact_path = body.artifact.clone().or_else(|| detected.artifact.clone());
+    let run_cmd = body.run_cmd.or_else(|| detected.run_cmd.clone());
+    let health_url = body.health_url.or_else(|| detected.health_url.clone());
+    let run_mode = body.run_mode.unwrap_or_else(|| detected.run_mode.clone());
+    let jvm_args = body.jvm_args.or_else(|| detected.jvm_args.clone());
+    let maven_settings = body.maven_settings.or_else(|| detected.maven_settings.clone());
+    let local_repo = body.local_repo.or_else(|| detected.local_repo.clone());
+    let envs = body.envs.unwrap_or_else(|| detected.envs.clone());
+    let branch = Mutex::new(body.branch.unwrap_or_else(|| "main".into()));
+
+    // Write config
+    let mut config_toml = format!("[watch]\nbranch = \"{}\"\n", branch.lock().unwrap());
+    if !build_cmd.is_empty() || artifact_path.is_some() || maven_settings.is_some() || local_repo.is_some() {
         config_toml.push_str("\n[build]\n");
-        config_toml.push_str(&format!("command = \"{}\"\n", cmd));
-        if let Some(ref art) = body.artifact { config_toml.push_str(&format!("artifact = \"{}\"\n", art)); }
-        if let Some(ref ms) = body.maven_settings { config_toml.push_str(&format!("maven_settings = \"{}\"\n", ms)); }
-        if let Some(ref lr) = body.local_repo { config_toml.push_str(&format!("local_repo = \"{}\"\n", lr)); }
+        config_toml.push_str(&format!("command = \"{}\"\n", build_cmd));
+        if let Some(ref art) = artifact_path { config_toml.push_str(&format!("artifact = \"{}\"\n", art)); }
+        if let Some(ref ms) = maven_settings { config_toml.push_str(&format!("maven_settings = \"{}\"\n", ms)); }
+        if let Some(ref lr) = local_repo { config_toml.push_str(&format!("local_repo = \"{}\"\n", lr)); }
     }
-    if body.run_cmd.is_some() || body.health_url.is_some() {
+    if run_cmd.is_some() || health_url.is_some() {
         config_toml.push_str("\n[run]\n");
-        if let Some(ref mode) = body.run_mode { config_toml.push_str(&format!("mode = \"{}\"\n", mode)); }
-        if let Some(ref cmd) = body.run_cmd { config_toml.push_str(&format!("command = \"{}\"\n", cmd)); }
-        if let Some(ref url) = body.health_url { config_toml.push_str(&format!("health_url = \"{}\"\n", url)); }
-        if let Some(ref ja) = body.jvm_args { config_toml.push_str(&format!("jvm_args = \"{}\"\n", ja)); }
+        config_toml.push_str(&format!("mode = \"{}\"\n", run_mode));
+        if let Some(ref cmd) = run_cmd { config_toml.push_str(&format!("command = \"{}\"\n", cmd)); }
+        if let Some(ref url) = health_url { config_toml.push_str(&format!("health_url = \"{}\"\n", url)); }
+        if let Some(ref ja) = jvm_args { config_toml.push_str(&format!("jvm_args = \"{}\"\n", ja)); }
     }
-    if let Some(ref envs) = body.envs {
-        if !envs.is_empty() {
-            config_toml.push_str("\n[env]\n");
-            for (k, v) in envs { config_toml.push_str(&format!("\"{}\" = \"{}\"\n", k, v)); }
-        }
+    if !envs.is_empty() {
+        config_toml.push_str("\n[env]\n");
+        for (k, v) in &envs { config_toml.push_str(&format!("\"{}\" = \"{}\"\n", k, v)); }
     }
     crate::project::ProjectConfig::save_config(&name, &config_toml)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1830,24 +1936,17 @@ async fn target_create(
         repo: repo.clone(),
         profile: body.profile.clone(),
         group: body.group.clone(),
-        label: body.label.clone(),
+        label: body.label.clone().or_else(|| Some(name.clone())),
     };
     crate::registry::append_entry(&entry)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Build in-memory state
-    let build_cmd = body.build_cmd.unwrap_or_else(|| "cargo build --release".into());
-    let artifact = body.artifact.map(std::path::PathBuf::from);
-    let run_cmd = body.run_cmd;
-    let health_url = body.health_url;
-    let run_mode = body.run_mode.unwrap_or_else(|| "deploy".into());
-    let jvm_args = body.jvm_args;
-    let envs = body.envs.unwrap_or_default();
-    let branch = Mutex::new(body.branch.unwrap_or_else(|| "main".into()));
+    let artifact = artifact_path.map(std::path::PathBuf::from);
 
     let ts = Arc::new(TargetState {
         name: name.clone(),
-        label: body.label.unwrap_or_else(|| name.clone()),
+        label: body.label.clone().unwrap_or_else(|| name.clone()),
         repo: repo.clone(),
         remote: "origin".into(),
         branch,
