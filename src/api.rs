@@ -1707,6 +1707,14 @@ async fn target_rename(
     crate::registry::rename_entry(&name, &new_name)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Rename config file
+    let old_path = crate::project::target_config_path(&name);
+    let new_path = crate::project::target_config_path(&new_name);
+    if old_path.exists() {
+        std::fs::rename(&old_path, &new_path)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("failed to rename config: {e}")))?;
+    }
+
     // Update in-memory
     let mut targets = s.targets.write().unwrap();
     let mut ts = targets.remove(&name).unwrap();
