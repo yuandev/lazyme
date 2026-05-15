@@ -345,7 +345,7 @@ function TargetDetail({ name }: { name: string }) {
   useEffect(() => { fetchBranches(name).then(b => { setBranches(b.branches); setBranchSel(b.current); }); }, [name]);
 
   const viewLog = async (hash: string) => { setLogHash(hash); setLog(await fetchTargetLogs(name, hash) || t.noLog); };
-  const handleRollback = async (commit: string) => { setLoading(true); await rollbackTarget(name, commit); setLoading(false); };
+  const handleRollback = async (commit: string) => { setLoading(true); await rollbackTarget(name, commit); await refresh(); setLoading(false); };
   const isOnline = status && status.health_status?.ok === true;
   const tabs = [
     { key: 'status' as const, label: t.status, icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg> },
@@ -390,11 +390,11 @@ function TargetDetail({ name }: { name: string }) {
       {tab === 'status' && (
         <div>
           <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-            <button onClick={async () => { setLoading(true); await deployTarget(name); setLoading(false); }} disabled={loading} style={{ ...S.primaryBtn, opacity: loading ? 0.5 : 1 }}>
+            <button onClick={async () => { setLoading(true); await deployTarget(name); await refresh(); setLoading(false); }} disabled={loading} style={{ ...S.primaryBtn, opacity: loading ? 0.5 : 1 }}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               {loading ? t.deploying : t.deployLatest}
             </button>
-            <button onClick={async () => { await autoDeployToggle(name); }} style={{ ...S.primaryBtn, background: status.auto_deploy_paused ? '#064e3b' : '#451a03', color: status.auto_deploy_paused ? '#6ee7b7' : '#fbbf24', border: `1px solid ${status.auto_deploy_paused ? '#065f46' : '#78350f'}` }}>
+            <button onClick={async () => { await autoDeployToggle(name); await refresh(); }} style={{ ...S.primaryBtn, background: status.auto_deploy_paused ? '#064e3b' : '#451a03', color: status.auto_deploy_paused ? '#6ee7b7' : '#fbbf24', border: `1px solid ${status.auto_deploy_paused ? '#065f46' : '#78350f'}` }}>
               {status.auto_deploy_paused ? '▶ ' + t.resume : '⏸ ' + t.pause}
             </button>
             {status.auto_deploy_paused && <span style={{ fontSize: 13, color: '#f59e0b', alignSelf: 'center' }}>{t.autoDeployPaused}</span>}
@@ -408,11 +408,11 @@ function TargetDetail({ name }: { name: string }) {
             <button onClick={async () => { const b = await fetchBranches(name); setBranches(b.branches); setBranchSel(b.current); }} style={{ ...S.cloneBtn, width: 24, height: 24 }} title="refresh branches">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
             </button>
-            <button onClick={async () => { setSwitchingBranch(true); await switchBranch(name, branchSel); setSwitchingBranch(false); }} disabled={switchingBranch || !branchSel || branchSel === status.branch} style={{ ...S.smallBtn, opacity: branchSel === status.branch ? 0.4 : 1 }}>
+            <button onClick={async () => { setSwitchingBranch(true); await switchBranch(name, branchSel); await refresh(); setSwitchingBranch(false); }} disabled={switchingBranch || !branchSel || branchSel === status.branch} style={{ ...S.smallBtn, opacity: branchSel === status.branch ? 0.4 : 1 }}>
               {switchingBranch ? '...' : t.switch_}
             </button>
             <div style={{ flex: 1 }} />
-            <button onClick={async () => { setFetching(true); await fetchTargetApi(name); setFetching(false); }} disabled={fetching} style={{ ...S.smallBtn, background: '#064e3b', color: '#6ee7b7' }}>
+            <button onClick={async () => { setFetching(true); await fetchTargetApi(name); await refresh(); setFetching(false); }} disabled={fetching} style={{ ...S.smallBtn, background: '#064e3b', color: '#6ee7b7' }}>
               {fetching ? '...' : t.fetch}
             </button>
           </div>
