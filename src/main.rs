@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
+            label: entry.label.clone().unwrap_or_else(|| entry.name.clone()),
             repo: entry.repo.clone(),
             remote: args.remote.clone(),
             branch,

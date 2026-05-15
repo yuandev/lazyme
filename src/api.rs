@@ -31,6 +31,7 @@ pub struct AppState {
 /// Per-target configuration and state.
 pub struct TargetState {
     pub name: String,
+    pub label: String,
     pub repo: PathBuf,
     pub remote: String,
     pub branch: Mutex<String>,
@@ -87,6 +88,7 @@ pub struct WsEvent {
 #[derive(Serialize)]
 struct TargetSummary {
     name: String,
+    label: String,
     repo: String,
     branch: String,
     deployed: Option<crate::state::DeployRecord>,
@@ -107,6 +109,7 @@ struct TargetListResponse {
 #[derive(Serialize)]
 struct StatusResponse {
     name: String,
+    label: String,
     repo: String,
     branch: String,
     deployed: Option<crate::state::DeployRecord>,
@@ -203,6 +206,7 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
             let health_ok = t.health_status.lock().unwrap().as_ref().map(|hs| hs.ok);
             TargetSummary {
                 name: t.name.clone(),
+                label: t.label.clone(),
                 repo: t.repo.display().to_string(),
                 branch: t.branch(),
                 deployed: st.current().clone(),
@@ -237,12 +241,27 @@ async fn target_status(
             (false, None, None)
         }
     };
-    let health_status = t.health_status.lock().unwrap().clone();
+    // On-demand health check when viewing target detail
+    let health_status = if let Some(ref url) = t.health_url {
+        let resolved = t.jvm_args.lock().unwrap().as_ref()
+            .and_then(|ja| ja.split_whitespace()
+                .find(|a| a.starts_with("-Dserver.port="))
+                .and_then(|a| a.split('=').nth(1)))
+            .map(|p| url.replace("{port}", p))
+            .unwrap_or_else(|| url.clone());
+        let ok = crate::process::health_check(&resolved, 3).await;
+        let hs = Some(HealthStatus { ok, last_check: chrono::Utc::now().to_rfc3339() });
+        *t.health_status.lock().unwrap() = hs.clone();
+        hs
+    } else {
+        t.health_status.lock().unwrap().clone()
+    };
     let jvm_args = t.jvm_args.lock().unwrap().clone();
     let envs = t.envs.lock().unwrap().clone();
     let auto_deploy_paused = *t.auto_deploy_paused.lock().unwrap();
     Ok(Json(StatusResponse {
         name: t.name.clone(),
+        label: t.label.clone(),
         repo: t.repo.display().to_string(),
         branch: t.branch(),
         deployed,
@@ -1017,6 +1036,7 @@ async fn target_clone(
         repo: repo.clone(),
         profile,
         group: body.group.clone().or_else(|| source.group.clone()),
+        label: None,
     };
     crate::registry::append_entry(&entry)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1024,6 +1044,7 @@ async fn target_clone(
     // Create new TargetState and insert
     let ts = Arc::new(TargetState {
         name: new_name.clone(),
+        label: new_name.clone(),
         repo: repo.clone(),
         remote: source.remote.clone(),
         branch: Mutex::new(source.branch()),

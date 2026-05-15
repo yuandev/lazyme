@@ -15,6 +15,7 @@ export interface HealthStatus {
 
 export interface TargetSummary {
   name: string;
+  label: string;
   repo: string;
   branch: string;
   deployed: DeployRecord | null;
@@ -33,6 +34,7 @@ export interface TargetListResponse {
 
 export interface StatusResponse {
   name: string;
+  label: string;
   repo: string;
   branch: string;
   deployed: DeployRecord | null;

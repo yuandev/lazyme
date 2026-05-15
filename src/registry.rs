@@ -10,6 +10,8 @@ pub struct TargetEntry {
     pub profile: Option<String>,
     #[serde(default)]
     pub group: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
