@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
             envs: Mutex::new(envs),
             run_mode,
             process: Mutex::new(None),
-            state: Mutex::new(state::StateManager::new(&entry.repo)),
+            state: Mutex::new(state::StateManager::new(&entry.name)),
             profile: entry.profile.clone(),
             group: entry.group.clone(),
             auto_deploy_paused: Mutex::new(false),

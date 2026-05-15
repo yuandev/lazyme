@@ -353,11 +353,7 @@ async fn target_logs(
         .get(&name)
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
-    let log_path = t
-        .repo
-        .join(".deployd")
-        .join("logs")
-        .join(format!("{hash}.log"));
+    let log_path = t.state.lock().unwrap().data_dir().join("logs").join(format!("{hash}.log"));
     let content =
         std::fs::read_to_string(&log_path).map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(Json(LogResponse {
@@ -646,7 +642,8 @@ pub async fn build_and_cache(
         }
 
         // Persist build log
-        let log_dir = repo.join(".deployd").join("logs");
+        let st = state.lock().unwrap();
+        let log_dir = st.data_dir().join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_path = log_dir.join(format!("{short}.log"));
         let _ = std::fs::write(&log_path, &log_buf);
@@ -654,14 +651,10 @@ pub async fn build_and_cache(
 
         let cache_path = if success {
             if let Some(artifact) = artifact_rel {
-                let st = state.lock().unwrap();
                 st.cache_artifact(&short, artifact).ok()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+            } else { None }
+        } else { None };
+        drop(st);
 
         (success, log_path, cache_path)
     };
@@ -1103,7 +1096,7 @@ async fn target_clone(
         envs: Mutex::new(source.envs.lock().unwrap().clone()),
         run_mode: source.run_mode.clone(),
         process: Mutex::new(None),
-        state: Mutex::new(crate::state::StateManager::new(&repo)),
+        state: Mutex::new(crate::state::StateManager::new(&new_name)),
         profile: Some(new_name.clone()),
         group: body.group.clone().or_else(|| source.group.clone()),
         auto_deploy_paused: Mutex::new(false),
@@ -1958,7 +1951,7 @@ async fn target_create(
         jvm_args: Mutex::new(jvm_args),
         envs: Mutex::new(envs),
         run_mode,
-        state: Mutex::new(crate::state::StateManager::new(&repo)),
+        state: Mutex::new(crate::state::StateManager::new(&name)),
         process: Mutex::new(None),
         profile: body.profile.clone(),
         group: body.group.clone(),

@@ -23,19 +23,19 @@ pub struct DeploymentState {
 
 pub struct StateManager {
     state_path: PathBuf,
-    repo_path: PathBuf,
+    data_dir: PathBuf,
     state: DeploymentState,
 }
 
 impl StateManager {
-    pub fn new(repo_path: &Path) -> Self {
-        let deploy_dir = repo_path.join(".deployd");
-        let state_path = deploy_dir.join("state.json");
+    pub fn new(target_name: &str) -> Self {
+        let data_dir = data_dir(target_name);
+        let state_path = data_dir.join("state.json");
         let state = std::fs::read_to_string(&state_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        Self { state_path, repo_path: repo_path.to_path_buf(), state }
+        Self { state_path, data_dir, state }
     }
 
     pub fn current(&self) -> &Option<DeployRecord> {
@@ -46,41 +46,26 @@ impl StateManager {
         &self.state.history
     }
 
-    pub fn deploy_dir(&self) -> PathBuf {
-        self.repo_path.join(".deployd")
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     pub fn cache_dir(&self, short_hash: &str) -> PathBuf {
-        self.deploy_dir().join("artifacts").join(short_hash)
+        self.data_dir.join("artifacts").join(short_hash)
     }
 
-    /// Check if a cached artifact exists for a given short hash + filename.
-    /// Returns the full cache path if it exists.
     pub fn find_cached_artifact(&self, short_hash: &str, artifact_name: &str) -> Option<PathBuf> {
         let path = self.cache_dir(short_hash).join(artifact_name);
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
+        if path.exists() { Some(path) } else { None }
     }
 
-    /// Copy the built artifact into the cache directory for a commit.
-    pub fn cache_artifact(
-        &self,
-        short_hash: &str,
-        artifact_rel: &Path,
-    ) -> Result<PathBuf> {
+    pub fn cache_artifact(&self, short_hash: &str, artifact_rel: &Path) -> Result<PathBuf> {
         let cache_dir = self.cache_dir(short_hash);
         std::fs::create_dir_all(&cache_dir)?;
-
-        let src = self.repo_path.join(artifact_rel);
-        let fname = src.file_name().context("artifact has no filename")?;
+        let fname = artifact_rel.file_name().context("artifact has no filename")?;
         let dst = cache_dir.join(fname);
-
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copy artifact from {} to {}", src.display(), dst.display()))?;
-
+        std::fs::copy(&artifact_rel, &dst)
+            .with_context(|| format!("copy artifact to {}", dst.display()))?;
         Ok(dst)
     }
 
@@ -102,11 +87,8 @@ impl StateManager {
             success,
             build_duration_secs,
         };
-
         if self.state.current.is_some() {
-            self.state
-                .history
-                .push(self.state.current.clone().unwrap());
+            self.state.history.push(self.state.current.clone().unwrap());
         }
         self.state.current = Some(record);
         self.save()?;
@@ -121,4 +103,17 @@ impl StateManager {
         std::fs::write(&self.state_path, json)?;
         Ok(())
     }
+}
+
+/// XDG data directory for a target: ~/.local/share/lazyme/{name}/
+fn data_dir(target_name: &str) -> PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home).join(".local/share")
+        });
+    let dir = base.join("lazyme").join(target_name);
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
