@@ -3,6 +3,7 @@ import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
   fetchTarget as fetchTargetApi, cloneTarget, fetchVersion, fetchQueue,
+  deleteTarget, renameTarget, createTarget,
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
   fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
   restartServer, autoDeployToggle,
@@ -29,6 +30,9 @@ function AppInner() {
   const [update, setUpdate] = useState<UpdateState>({ phase: null, version: null, progress: 0, error: null });
   const [liveLog, setLiveLog] = useState<{ target: string; commit: string } | null>(null);
   const [liveLines, setLiveLines] = useState<string[]>([]);
+  const [showCreate, setShowCreate] = useState(false);
+  const [deleteTargetName, setDeleteTarget] = useState<string | null>(null);
+  const [deleteStage, setDeleteStage] = useState<'confirm' | 'stopping' | 'deleting' | 'done'>('confirm');
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   const refreshTargets = useCallback(async () => {
@@ -113,6 +117,12 @@ function AppInner() {
       </header>
       <div style={S.body}>
         <aside style={S.sidebar}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 4px 12px' }}>
+            <span style={{ fontSize: 11, color: '#4b5563', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Targets</span>
+            <button onClick={() => setShowCreate(true)} style={{ ...S.smallBtn, background: '#065f46', color: '#6ee7b7', fontSize: 11, padding: '3px 10px' }}>
+              + {t.newTarget}
+            </button>
+          </div>
           {(() => {
             const groups = new Map<string | null, TargetSummary[]>();
             for (const tg of targets) {
@@ -144,6 +154,16 @@ function AppInner() {
                     }} style={S.cloneBtn} title={t.clone}>
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                     </button>
+                    <button onClick={() => {
+                      const nn = prompt(t.renameTitle.replace('{name}', tg.name), tg.name);
+                      if (!nn || nn === tg.name) return;
+                      renameTarget(tg.name, nn).then(() => refreshTargets()).catch((e: any) => alert(e.message || 'Rename failed'));
+                    }} style={S.cloneBtn} title={t.rename}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                    </button>
+                    <button onClick={() => setDeleteTarget(tg.name)} style={{ ...S.cloneBtn, borderColor: '#450a0a' }} title={t.delete}>
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#f87171" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
                   </div>
                 ))}
               </div>
@@ -164,6 +184,128 @@ function AppInner() {
           )}
           {selected ? <TargetDetail name={selected} /> : <NoSelection />}
         </main>
+      </div>
+      {deleteTargetName && <DeleteDialog name={deleteTargetName} stage={deleteStage} t={t} lang={lang} onStage={setDeleteStage} onClose={() => { setDeleteTarget(null); setDeleteStage('confirm'); }} onDone={() => { setDeleteTarget(null); setDeleteStage('confirm'); refreshTargets(); }} />}
+      {showCreate && <CreateModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); refreshTargets(); }} />}
+    </div>
+  );
+}
+
+function DeleteDialog({ name, stage, t, lang, onStage, onClose, onDone }: { name: string; stage: string; t: any; lang: string; onStage: (s: any) => void; onClose: () => void; onDone: () => void }) {
+  const doDelete = async () => {
+    onStage('stopping');
+    await new Promise(r => setTimeout(r, 2000));
+    onStage('deleting');
+    try { await deleteTarget(name); onStage('done'); onDone(); }
+    catch (e: any) { alert(e.message || 'Delete failed'); onClose(); }
+  };
+  return (
+    <div style={S.modalOverlay} onClick={() => { if (stage === 'confirm' || stage === 'done') onClose(); }}>
+      <div style={S.modal} onClick={e => e.stopPropagation()}>
+        {stage === 'confirm' && <>
+          <h3 style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9', margin: '0 0 8px' }}>{tf(t.deleteTitle, { name })}</h3>
+          <p style={{ fontSize: 13, color: '#9ca3af', margin: '0 0 16px' }}>{t.deleteWarn}</p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={onClose} style={S.smallBtn}>{lang === 'zh' ? '取消' : 'Cancel'}</button>
+            <button onClick={doDelete} style={{ ...S.primaryBtn, background: '#991b1b', color: '#fca5a5' }}>{t.delete}</button>
+          </div>
+        </>}
+        {stage === 'stopping' && <Spinner text={t.deleting} />}
+        {stage === 'deleting' && <Spinner text={t.deletingClean} />}
+        {stage === 'done' && <div style={{ textAlign: 'center', padding: 16 }}>
+          <div style={{ width: 40, height: 40, borderRadius: '50%', background: '#052e16', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#4ade80" strokeWidth="2"><polyline points="20 6 9 17 4 12"/></svg>
+          </div>
+          <p style={{ color: '#4ade80', margin: 0, fontSize: 14, fontWeight: 600 }}>{t.deletingDone}</p>
+          <button onClick={onClose} style={{ ...S.smallBtn, marginTop: 12 }}>{lang === 'zh' ? '关闭' : 'Close'}</button>
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+function Spinner({ text }: { text: string }) {
+  return <div style={{ textAlign: 'center', padding: 16 }}>
+    <div style={{ width: 24, height: 24, border: '2px solid #fbbf24', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', margin: '0 auto 12px' }} />
+    <p style={{ color: '#fbbf24', margin: 0, fontSize: 14 }}>{text}</p>
+  </div>;
+}
+
+function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+  const { t } = useI18n();
+  const [name, setName] = useState('');
+  const [label, setLabel] = useState('');
+  const [repo, setRepo] = useState('');
+  const [branch, setBranch] = useState('main');
+  const [group, setGroup] = useState('');
+  const [gitRemote, setGitRemote] = useState('');
+  const [buildCmd, setBuildCmd] = useState('');
+  const [artifact, setArtifact] = useState('');
+  const [runCmd, setRunCmd] = useState('');
+  const [healthUrl, setHealthUrl] = useState('');
+  const [runMode, setRunMode] = useState('deploy');
+  const [jvmArgs, setJvmArgs] = useState('');
+  const [envsText, setEnvsText] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  const doCreate = async () => {
+    if (!name || !repo) { setErr('Name and repo path are required'); return; }
+    setSaving(true); setErr('');
+    const envs: Record<string, string> = {};
+    envsText.split('\n').forEach(line => { const idx = line.indexOf('='); if (idx > 0) envs[line.slice(0, idx).trim()] = line.slice(idx + 1).trim(); });
+    try {
+      await createTarget({
+        name, label: label || name, repo, branch: branch || 'main', group: group || undefined, git_remote: gitRemote || undefined,
+        build_cmd: buildCmd || undefined, artifact: artifact || undefined, run_cmd: runCmd || undefined,
+        health_url: healthUrl || undefined, run_mode: runMode, jvm_args: jvmArgs || undefined,
+        envs: Object.keys(envs).length > 0 ? envs : undefined,
+      });
+      onCreated();
+    } catch (e: any) { setErr(e.message || 'Create failed'); }
+    setSaving(false);
+  };
+
+  const field = (l: string, v: string, set: (v: string) => void, ph?: string) => (
+    <div style={{ marginBottom: 10 }}>
+      <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{l}</label>
+      <input value={v} onChange={e => set(e.target.value)} style={S.inputField} placeholder={ph || ''} />
+    </div>
+  );
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 520, maxHeight: '80vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3 style={{ fontSize: 16, fontWeight: 700, color: '#f1f5f9', margin: 0 }}>{t.newTarget}</h3>
+          <button onClick={onClose} style={{ ...S.smallBtn, background: '#1f1f2a', color: '#9ca3af' }}>✕</button>
+        </div>
+        {field(t.newName || 'Name *', name, setName)}
+        {field('Label', label, setLabel, name)}
+        {field(t.repoPath, repo, setRepo, '/home/yuan/project')}
+        {field(t.gitRemote, gitRemote, setGitRemote, 'git@192.168.8.200:group/repo.git')}
+        {field(t.branchLabel, branch, setBranch, 'main')}
+        {field('Group', group, setGroup, 'backend')}
+        {field(t.build, buildCmd, setBuildCmd, 'mvn package -DskipTests')}
+        {field('Artifact', artifact, setArtifact, 'target/app.jar')}
+        {field(t.run, runCmd, setRunCmd, 'java {jvm_args} -jar {artifact}')}
+        {field(t.health, healthUrl, setHealthUrl, 'http://localhost:{port}/health')}
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.mode}</label>
+          <select value={runMode} onChange={e => setRunMode(e.target.value)} style={{ ...S.select, maxWidth: '100%', width: '100%' }}>
+            <option value="deploy">deploy</option>
+            <option value="dev">dev</option>
+          </select>
+        </div>
+        {field(t.jvmArgs, jvmArgs, setJvmArgs, '-Dserver.port=8080 -Xmx512m')}
+        <div style={{ marginBottom: 10 }}>
+          <label style={{ display: 'block', fontSize: 11, color: '#6b7280', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{t.envVars}</label>
+          <textarea value={envsText} onChange={e => setEnvsText(e.target.value)} style={{ ...S.textarea, minHeight: 100 }} placeholder="JAVA_HOME=/path&#10;SPRING_PROFILES_ACTIVE=prod" spellCheck={false} />
+        </div>
+        {err && <div style={{ color: '#f87171', fontSize: 13, marginBottom: 10 }}>{err}</div>}
+        <button onClick={doCreate} disabled={saving} style={{ ...S.primaryBtn, width: '100%', justifyContent: 'center', opacity: saving ? 0.5 : 1 }}>
+          {saving ? t.saving : t.createTarget}
+        </button>
       </div>
     </div>
   );
@@ -531,6 +673,8 @@ const S: Record<string, React.CSSProperties> = {
   select: { padding: '5px 10px', border: '1px solid #1f1f2a', borderRadius: 6, background: '#09090b', color: '#d1d5db', fontSize: 12, fontFamily: 'monospace', outline: 'none', maxWidth: 200 },
   liveLog: { background: '#09090b', padding: 12, borderRadius: 8, fontSize: 11, fontFamily: "'SF Mono', 'Fira Code', Menlo, monospace", color: '#9ca3af', whiteSpace: 'pre-wrap', maxHeight: 250, overflow: 'auto', margin: 0, lineHeight: 1.5, border: '1px solid #1a1a24' },
   buildLog: { background: '#09090b', padding: 12, borderRadius: 8, fontSize: 11, fontFamily: "'SF Mono', 'Fira Code', Menlo, monospace", color: '#9ca3af', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto', lineHeight: 1.6, border: '1px solid #1a1a24' },
+  modalOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
+  modal: { background: '#0c0c10', border: '1px solid #1f1f2a', borderRadius: 12, padding: 24, minWidth: 360, maxWidth: 480, boxShadow: '0 25px 50px rgba(0,0,0,0.5)' },
 };
 
 export default App;

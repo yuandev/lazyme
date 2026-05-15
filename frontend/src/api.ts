@@ -256,3 +256,52 @@ export async function saveEnv(name: string, jvm_args: string | null, envs: Recor
     body: JSON.stringify({ jvm_args, envs }),
   });
 }
+
+export async function deleteTarget(name: string, keepFiles?: boolean): Promise<{ status: string }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keep_files: keepFiles ?? false }),
+  });
+  if (!res.ok) throw new Error((await res.json() as any).message || 'Delete failed');
+  return res.json();
+}
+
+export async function renameTarget(name: string, newName: string): Promise<{ status: string }> {
+  const res = await fetch(`${API}/targets/${encodeURIComponent(name)}/rename`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_name: newName }),
+  });
+  if (!res.ok) throw new Error((await res.json() as any).message || 'Rename failed');
+  return res.json();
+}
+
+export interface CreateTargetParams {
+  name: string;
+  label?: string;
+  repo: string;
+  branch?: string;
+  group?: string;
+  profile?: string;
+  git_remote?: string;
+  build_cmd?: string;
+  artifact?: string;
+  run_cmd?: string;
+  health_url?: string;
+  run_mode?: string;
+  jvm_args?: string;
+  maven_settings?: string;
+  local_repo?: string;
+  envs?: Record<string, string>;
+}
+
+export async function createTarget(params: CreateTargetParams): Promise<{ status: string }> {
+  const res = await fetch(`${API}/targets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error((await res.json() as any).message || 'Create failed');
+  return res.json();
+}

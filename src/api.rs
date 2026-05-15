@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Json},
-    routing::{get, post},
+    routing::{get, post, delete},
     Router,
 };
 use serde::{Deserialize, Serialize};
@@ -1547,6 +1547,274 @@ async fn restart_handler() -> Json<serde_json::Value> {
     crate::self_update::restart();
 }
 
+// ── Delete target ──
+
+#[derive(Deserialize)]
+struct DeleteBody {
+    keep_files: Option<bool>,
+}
+
+/// DELETE /api/targets/{name} — stop service, verify, remove from registry
+async fn target_delete(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<DeleteBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    // 1. Stop the process
+    let mut proc = t.process.lock().unwrap();
+    if let Some(ref mut p) = *proc {
+        p.kill();
+        // Wait for process to actually stop
+        for _ in 0..30 {
+            if !p.is_running() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+    *proc = None;
+    drop(proc);
+
+    // 2. Verify process stopped
+    let running = t.process.lock().unwrap().is_some();
+    if running {
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "failed to stop process".into()));
+    }
+
+    // 3. Remove from registry
+    let keep = body.keep_files.unwrap_or(false);
+    if !keep {
+        let deploy_dir = t.repo.join(".deployd");
+        if deploy_dir.exists() {
+            let _ = std::fs::remove_dir_all(&deploy_dir);
+        }
+    }
+    crate::registry::remove_entry(&name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // 4. Remove from in-memory targets
+    s.targets.write().unwrap().remove(&name);
+
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: name.clone(),
+        commit: None,
+        message: None,
+    });
+
+    Ok(Json(serde_json::json!({"status": "ok", "target": name})))
+}
+
+// ── Rename target ──
+
+#[derive(Deserialize)]
+struct RenameBody {
+    new_name: String,
+}
+
+/// POST /api/targets/{name}/rename
+async fn target_rename(
+    State(s): State<SharedState>,
+    Path(name): Path<String>,
+    Json(body): Json<RenameBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let new_name = body.new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "new_name is required".into()));
+    }
+    if new_name == name {
+        return Err((StatusCode::BAD_REQUEST, "new_name must be different".into()));
+    }
+    if s.targets.read().unwrap().contains_key(&new_name) {
+        return Err((StatusCode::CONFLICT, format!("target '{new_name}' already exists")).into());
+    }
+
+    let t = s
+        .targets.read().unwrap()
+        .get(&name)
+        .cloned()
+        .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
+
+    crate::registry::rename_entry(&name, &new_name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Update in-memory
+    let mut targets = s.targets.write().unwrap();
+    let mut ts = targets.remove(&name).unwrap();
+    Arc::get_mut(&mut ts).unwrap().name = new_name.clone();
+    Arc::get_mut(&mut ts).unwrap().label = new_name.clone();
+    targets.insert(new_name.clone(), ts);
+
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: new_name.clone(),
+        commit: None,
+        message: None,
+    });
+
+    Ok(Json(serde_json::json!({"status": "ok", "old_name": name, "new_name": new_name})))
+}
+
+// ── Create target ──
+
+#[derive(Deserialize)]
+struct CreateTargetBody {
+    name: String,
+    label: Option<String>,
+    repo: String,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    git_remote: Option<String>,
+    #[serde(default)]
+    build_cmd: Option<String>,
+    #[serde(default)]
+    artifact: Option<String>,
+    #[serde(default)]
+    run_cmd: Option<String>,
+    #[serde(default)]
+    health_url: Option<String>,
+    #[serde(default)]
+    run_mode: Option<String>,
+    #[serde(default)]
+    jvm_args: Option<String>,
+    #[serde(default)]
+    maven_settings: Option<String>,
+    #[serde(default)]
+    local_repo: Option<String>,
+    envs: Option<HashMap<String, String>>,
+}
+
+/// POST /api/targets — create a new target
+async fn target_create(
+    State(s): State<SharedState>,
+    Json(body): Json<CreateTargetBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "name is required".into()));
+    }
+    let repo = std::path::PathBuf::from(body.repo.trim());
+    if body.repo.trim().is_empty() || !repo.exists() {
+        return Err((StatusCode::BAD_REQUEST, "repo path does not exist".into()));
+    }
+
+    if s.targets.read().unwrap().contains_key(&name) {
+        return Err((StatusCode::CONFLICT, format!("target '{name}' already exists").into()));
+    }
+
+    // Clone git repo if remote provided and directory is empty
+    if let Some(ref git_url) = body.git_remote {
+        if repo.read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
+            let output = std::process::Command::new("git")
+                .args(["clone", git_url, &body.repo.trim()])
+                .output()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("git clone failed: {}", stderr.trim())));
+            }
+        }
+    }
+
+    // Write .deployd/config.toml
+    let deploy_dir = repo.join(".deployd");
+    std::fs::create_dir_all(&deploy_dir).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mut config_toml = String::from("[watch]\n");
+    config_toml.push_str(&format!("branch = \"{}\"\n", body.branch.as_deref().unwrap_or("main")));
+    if let Some(ref cmd) = body.build_cmd {
+        config_toml.push_str("\n[build]\n");
+        config_toml.push_str(&format!("command = \"{}\"\n", cmd));
+        if let Some(ref art) = body.artifact { config_toml.push_str(&format!("artifact = \"{}\"\n", art)); }
+        if let Some(ref ms) = body.maven_settings { config_toml.push_str(&format!("maven_settings = \"{}\"\n", ms)); }
+        if let Some(ref lr) = body.local_repo { config_toml.push_str(&format!("local_repo = \"{}\"\n", lr)); }
+    }
+    if body.run_cmd.is_some() || body.health_url.is_some() {
+        config_toml.push_str("\n[run]\n");
+        if let Some(ref mode) = body.run_mode { config_toml.push_str(&format!("mode = \"{}\"\n", mode)); }
+        if let Some(ref cmd) = body.run_cmd { config_toml.push_str(&format!("command = \"{}\"\n", cmd)); }
+        if let Some(ref url) = body.health_url { config_toml.push_str(&format!("health_url = \"{}\"\n", url)); }
+        if let Some(ref ja) = body.jvm_args { config_toml.push_str(&format!("jvm_args = \"{}\"\n", ja)); }
+    }
+    if let Some(ref envs) = body.envs {
+        if !envs.is_empty() {
+            config_toml.push_str("\n[env]\n");
+            for (k, v) in envs { config_toml.push_str(&format!("\"{}\" = \"{}\"\n", k, v)); }
+        }
+    }
+    let config_path = deploy_dir.join("config.toml");
+    std::fs::write(&config_path, config_toml).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Append to registry
+    let entry = crate::registry::TargetEntry {
+        name: name.clone(),
+        repo: repo.clone(),
+        profile: body.profile.clone(),
+        group: body.group.clone(),
+        label: body.label.clone(),
+    };
+    crate::registry::append_entry(&entry)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Build in-memory state
+    let build_cmd = body.build_cmd.unwrap_or_else(|| "cargo build --release".into());
+    let artifact = body.artifact.map(std::path::PathBuf::from);
+    let run_cmd = body.run_cmd;
+    let health_url = body.health_url;
+    let run_mode = body.run_mode.unwrap_or_else(|| "deploy".into());
+    let jvm_args = body.jvm_args;
+    let envs = body.envs.unwrap_or_default();
+    let branch = Mutex::new(body.branch.unwrap_or_else(|| "main".into()));
+
+    let ts = Arc::new(TargetState {
+        name: name.clone(),
+        label: body.label.unwrap_or_else(|| name.clone()),
+        repo: repo.clone(),
+        remote: "origin".into(),
+        branch,
+        build_cmd,
+        artifact,
+        run_cmd,
+        health_url,
+        health_timeout: 30,
+        jvm_args: Mutex::new(jvm_args),
+        envs: Mutex::new(envs),
+        run_mode,
+        state: Mutex::new(crate::state::StateManager::new(&repo)),
+        process: Mutex::new(None),
+        profile: body.profile.clone(),
+        group: body.group.clone(),
+        auto_deploy_paused: Mutex::new(false),
+        health_status: Mutex::new(None),
+        auto_restart: false,
+    });
+
+    s.targets.write().unwrap().insert(name.clone(), ts.clone());
+
+    // Spawn poll loop
+    let interval = s.interval;
+    let tx = s.tx.clone();
+    let lock = s.build_lock.clone();
+    tokio::spawn(async move { crate::poll_loop(ts, interval, tx, lock).await });
+
+    let _ = s.tx.send(WsEvent {
+        event: "targets_changed".into(),
+        target: name.clone(),
+        commit: None,
+        message: None,
+    });
+
+    Ok(Json(serde_json::json!({"status": "ok", "target": name})))
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
@@ -1564,6 +1832,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/targets/{name}/branches", get(target_branches))
         .route("/api/targets/{name}/fetch", post(target_fetch))
         .route("/api/targets/{name}/clone", post(target_clone))
+        .route("/api/targets/{name}/rename", post(target_rename))
+        .route("/api/targets/{name}", delete(target_delete))
+        .route("/api/targets", post(target_create))
         .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
         .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
         .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
