@@ -179,8 +179,10 @@ function AppInner() {
                     style={{ ...s.targetCard, ...(selected === target.name ? s.targetCardActive : {}) }}
                   >
                     <div style={s.cardName}>
-                      {target.process_running && <span style={s.dot} />}
                       {target.name}
+                      <span style={target.process_running && target.health_ok !== false ? s.badgeOnline : s.badgeOffline}>
+                        {target.process_running && target.health_ok !== false ? t.online : t.offline}
+                      </span>
                       <span style={s.serviceBadge}>{target.service_type}</span>
                     </div>
                     <div style={s.cardMeta}>
@@ -322,7 +324,9 @@ function TargetDetail({ name }: { name: string }) {
         <h2 style={s.detailName}>{status.name}</h2>
         <span style={s.detailRepo}>{status.repo}</span>
         <span style={s.detailBranch}>@{status.branch}</span>
-        {status.process_running && <span style={s.badgeGreen}>{t.running}</span>}
+        <span style={status.process_running && status.health_status?.ok !== false ? s.badgeOnline : s.badgeOffline}>
+          {status.process_running && status.health_status?.ok !== false ? t.online : t.offline}
+        </span>
         {status.health_url && (
           <>
             <span style={s.badgeCache}>{t.health} {status.health_url}</span>
@@ -716,6 +720,8 @@ const s: Record<string, React.CSSProperties> = {
   btnDisabled: { opacity: 0.4, cursor: 'default' },
   badgeGreen: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#166534', color: '#4ade80' },
   badgeYellow: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#713f12', color: '#facc15' },
+  badgeOnline: { display: 'inline-block', padding: '0.1rem 0.5rem', borderRadius: 999, fontSize: '0.65rem', background: '#166534', color: '#4ade80', fontWeight: 600, marginLeft: '0.5rem' },
+  badgeOffline: { display: 'inline-block', padding: '0.1rem 0.5rem', borderRadius: 999, fontSize: '0.65rem', background: '#7f1d1d', color: '#fca5a5', fontWeight: 600, marginLeft: '0.5rem' },
   badgeCache: { display: 'inline-block', padding: '0.15rem 0.5rem', borderRadius: 999, fontSize: '0.7rem', background: '#1e3a5f', color: '#7dd3fc' },
   empty: { color: '#64748b', padding: '2rem', textAlign: 'center' },
   log: { background: '#0f172a', padding: '1rem', borderRadius: 6, fontSize: '0.75rem', fontFamily: 'monospace', color: '#94a3b8', whiteSpace: 'pre-wrap', maxHeight: 400, overflow: 'auto' },

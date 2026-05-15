@@ -24,6 +24,7 @@ export interface TargetSummary {
   health_url: string | null;
   group: string | null;
   service_type: string;
+  health_ok: boolean | null;
 }
 
 export interface TargetListResponse {

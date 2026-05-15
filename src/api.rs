@@ -96,6 +96,7 @@ struct TargetSummary {
     health_url: Option<String>,
     group: Option<String>,
     service_type: String,
+    health_ok: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +200,7 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
             let running = t.process.lock().unwrap().as_mut().map_or(false, |p| p.is_running());
+            let health_ok = t.health_status.lock().unwrap().as_ref().map(|hs| hs.ok);
             TargetSummary {
                 name: t.name.clone(),
                 repo: t.repo.display().to_string(),
@@ -210,6 +212,7 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
                 health_url: t.health_url.clone(),
                 group: t.group.clone(),
                 service_type: detect_service_type(t.run_cmd.as_deref()),
+                health_ok,
             }
         })
         .collect();
