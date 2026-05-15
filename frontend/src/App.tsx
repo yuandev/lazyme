@@ -662,19 +662,21 @@ function ConfigEditor({ name, serviceType }: { name: string; serviceType: string
   const [subTab, setSubTab] = useState<'config' | 'maven' | 'vite' | 'env' | 'repo'>('config');
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
+  const [loaded, setLoaded] = useState<Record<string, boolean>>({});
 
-  const load = useCallback(async () => {
+  const loadTab = useCallback(async (tab: string) => {
+    if (loaded[tab]) return;
+    setLoaded(prev => ({ ...prev, [tab]: true }));
     try {
-      const [cfg, ms, vc, env, lr] = await Promise.all([fetchConfig(name), fetchMavenSettings(name), fetchViteConfig(name), fetchEnv(name), fetchLocalRepo(name)]);
-      setConfig(cfg.content); setConfigPath(cfg.path);
-      setMavenSettings(ms.content); setMavenSettingsPath(ms.path);
-      setViteConfig(vc.content); setViteConfigPath(vc.path);
-      setJvmArgs(env.jvm_args ?? ''); setEnvsText(Object.entries(env.envs).map(([k, v]) => `${k}=${v}`).join('\n'));
-      setLocalRepo(lr.local_repo);
+      if (tab === 'config') { const c = await fetchConfig(name); setConfig(c.content); setConfigPath(c.path); }
+      else if (tab === 'maven') { const m = await fetchMavenSettings(name); setMavenSettings(m.content); setMavenSettingsPath(m.path); }
+      else if (tab === 'vite') { const v = await fetchViteConfig(name); setViteConfig(v.content); setViteConfigPath(v.path); }
+      else if (tab === 'env') { const e = await fetchEnv(name); setJvmArgs(e.jvm_args ?? ''); setEnvsText(Object.entries(e.envs).map(([k, v]) => `${k}=${v}`).join('\n')); }
+      else if (tab === 'repo') { const l = await fetchLocalRepo(name); setLocalRepo(l.local_repo); }
     } catch { /* */ }
-  }, [name]);
+  }, [name, loaded]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadTab('config'); }, [name]); // always load config on mount
 
   const save = async (fn: () => Promise<void>) => {
     setSaving(true); setStatusMsg('');
@@ -695,7 +697,7 @@ function ConfigEditor({ name, serviceType }: { name: string; serviceType: string
     <div>
       <div style={S.tabBar}>
         {cfgTabs.map(ct => (
-          <button key={ct.key} onClick={() => setSubTab(ct.key)} style={{ ...S.tab, ...(subTab === ct.key ? S.tabActive : {}) }}>{ct.label}</button>
+          <button key={ct.key} onClick={() => { setSubTab(ct.key); loadTab(ct.key); }} style={{ ...S.tab, ...(subTab === ct.key ? S.tabActive : {}) }}>{ct.label}</button>
         ))}
       </div>
       {subTab === 'config' && (
