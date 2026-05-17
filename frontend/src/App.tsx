@@ -34,6 +34,7 @@ function AppInner() {
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTargetName, setDeleteTarget] = useState<string | null>(null);
   const [deleteStage, setDeleteStage] = useState<'confirm' | 'stopping' | 'deleting' | 'done'>('confirm');
+  const [wsConnected, setWsConnected] = useState(false);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // Check for token in URL params
@@ -58,9 +59,11 @@ function AppInner() {
   }, [refreshTargets]);
 
   useEffect(() => {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws${wsToken()}`);
-    ws.onmessage = (ev) => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+
+    const handleMessage = (ev: MessageEvent) => {
       try {
         const data = JSON.parse(ev.data);
         switch (data.event) {
@@ -80,8 +83,28 @@ function AppInner() {
         }
       } catch { /* ignore */ }
     };
-    ws.onclose = () => {};
-    return () => { ws.close(); };
+
+    const connect = () => {
+      if (stopped) return;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/ws${wsToken()}`);
+      ws.onopen = () => setWsConnected(true);
+      ws.onmessage = handleMessage;
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (!stopped) {
+          reconnectTimer = setTimeout(connect, 3000);
+        }
+      };
+      ws.onerror = () => { ws?.close(); };
+    };
+
+    connect();
+    return () => {
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
+    };
   }, [refreshTargets]);
 
   useEffect(() => { logEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [liveLines]);
@@ -105,6 +128,7 @@ function AppInner() {
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/><path d="M14.5 8.5 21 3"/></svg>
           <span style={S.logoText}>lazyme</span>
           <span style={S.versionChip}>v{currentVersion}</span>
+          <span style={{ fontSize: 10, color: wsConnected ? '#4ade80' : '#f87171' }}>{wsConnected ? '●' : '○'}</span>
         </div>
         <div style={{ flex: 1 }} />
         {building && <span style={S.buildingBadge}><span style={S.pulse} />{t.building} {building}</span>}
