@@ -134,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         tx,
         build_lock: build_lock.clone(),
         update_repo: args.update_repo.clone(),
+        token: args.token.clone(),
     });
 
     // Start one poller per target, each with random jitter per tick

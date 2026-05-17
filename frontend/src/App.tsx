@@ -7,6 +7,7 @@ import {
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
   fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
   restartServer, autoDeployToggle, stopTarget,
+  setToken, wsToken,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 import { I18nProvider, useI18n, tf } from './i18n';
@@ -35,6 +36,13 @@ function AppInner() {
   const [deleteStage, setDeleteStage] = useState<'confirm' | 'stopping' | 'deleting' | 'done'>('confirm');
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
+  // Check for token in URL params
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const t = params.get('token');
+    if (t) { setToken(t); window.history.replaceState({}, '', location.pathname); }
+  }, []);
+
   const refreshTargets = useCallback(async () => {
     const list = await fetchTargets();
     setTargets(list);
@@ -51,7 +59,7 @@ function AppInner() {
 
   useEffect(() => {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(`${proto}://${location.host}/ws${wsToken()}`);
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data);

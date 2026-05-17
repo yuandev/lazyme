@@ -21,4 +21,9 @@ pub struct Args {
     /// GitHub owner/repo for self-update (default: yuandev/lazyme)
     #[arg(long, default_value = "yuandev/lazyme")]
     pub update_repo: String,
+
+    /// Optional shared secret token for authentication. When set, all API requests
+    /// must include `Authorization: Bearer <token>`. Leave empty to disable auth.
+    #[arg(long, default_value = "")]
+    pub token: String,
 }

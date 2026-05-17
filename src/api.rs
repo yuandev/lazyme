@@ -4,9 +4,10 @@ use crate::queue::BuildLock;
 use crate::state::StateManager;
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
-    response::{IntoResponse, Json},
+    middleware::Next,
+    response::{IntoResponse, Json, Response},
     routing::{get, post, delete},
     Router,
 };
@@ -26,6 +27,7 @@ pub struct AppState {
     pub tx: broadcast::Sender<WsEvent>,
     pub build_lock: Arc<BuildLock>,
     pub update_repo: String,
+    pub token: String,
 }
 
 /// Per-target configuration and state.
@@ -160,8 +162,18 @@ struct LogResponse {
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
     State(s): State<SharedState>,
 ) -> impl IntoResponse {
+    if !s.token.is_empty() {
+        let provided = params.get("token").map(|s| s.as_str()).unwrap_or("");
+        if provided != s.token {
+            return axum::response::Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(axum::body::Body::from("invalid token"))
+                .unwrap();
+        }
+    }
     ws.on_upgrade(move |socket| handle_socket(socket, s))
 }
 
@@ -2057,36 +2069,62 @@ async fn target_create(
     Ok(Json(serde_json::json!({"status": "ok", "target": name})))
 }
 
+// ── Auth middleware ──
+
+async fn auth_middleware(
+    State(s): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if s.token.is_empty() {
+        return next.run(request).await;
+    }
+    let header = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let expected = format!("Bearer {}", s.token);
+    if header == expected {
+        return next.run(request).await;
+    }
+    (StatusCode::UNAUTHORIZED, "invalid token").into_response()
+}
+
 // ── Router ──
 
 pub fn router(state: SharedState) -> Router {
+    let api = Router::new()
+        .route("/queue", get(queue_status))
+        .route("/targets", get(list_targets))
+        .route("/targets/{name}/status", get(target_status))
+        .route("/targets/{name}/commits", get(target_commits))
+        .route("/targets/{name}/history", get(target_history))
+        .route("/targets/{name}/logs/{hash}", get(target_logs))
+        .route("/targets/{name}/rollback", post(target_rollback))
+        .route("/targets/{name}/deploy", post(target_deploy))
+        .route("/targets/{name}/branch", post(target_set_branch))
+        .route("/targets/{name}/branches", get(target_branches))
+        .route("/targets/{name}/fetch", post(target_fetch))
+        .route("/targets/{name}/clone", post(target_clone))
+        .route("/targets/{name}/rename", post(target_rename))
+        .route("/targets/{name}", delete(target_delete))
+        .route("/targets", post(target_create))
+        .route("/targets/{name}/config", get(target_get_config).put(target_put_config))
+        .route("/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
+        .route("/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
+        .route("/targets/{name}/stop", post(target_stop))
+        .route("/targets/{name}/auto-deploy", post(target_auto_deploy))
+        .route("/targets/{name}/env", get(target_get_env).put(target_put_env))
+        .route("/targets/{name}/local-repo", get(target_get_local_repo))
+        .route("/reload", post(reload_config))
+        .route("/self-update", post(self_update_handler))
+        .route("/restart", post(restart_handler))
+        .route("/version", get(version_handler))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
+
     Router::new()
         .route("/ws", get(ws_handler))
-        .route("/api/queue", get(queue_status))
-        .route("/api/targets", get(list_targets))
-        .route("/api/targets/{name}/status", get(target_status))
-        .route("/api/targets/{name}/commits", get(target_commits))
-        .route("/api/targets/{name}/history", get(target_history))
-        .route("/api/targets/{name}/logs/{hash}", get(target_logs))
-        .route("/api/targets/{name}/rollback", post(target_rollback))
-        .route("/api/targets/{name}/deploy", post(target_deploy))
-        .route("/api/targets/{name}/branch", post(target_set_branch))
-        .route("/api/targets/{name}/branches", get(target_branches))
-        .route("/api/targets/{name}/fetch", post(target_fetch))
-        .route("/api/targets/{name}/clone", post(target_clone))
-        .route("/api/targets/{name}/rename", post(target_rename))
-        .route("/api/targets/{name}", delete(target_delete))
-        .route("/api/targets", post(target_create))
-        .route("/api/targets/{name}/config", get(target_get_config).put(target_put_config))
-        .route("/api/targets/{name}/maven-settings", get(target_get_maven_settings).put(target_put_maven_settings))
-        .route("/api/targets/{name}/vite-config", get(target_get_vite_config).put(target_put_vite_config))
-        .route("/api/targets/{name}/stop", post(target_stop))
-        .route("/api/targets/{name}/auto-deploy", post(target_auto_deploy))
-        .route("/api/targets/{name}/env", get(target_get_env).put(target_put_env))
-        .route("/api/targets/{name}/local-repo", get(target_get_local_repo))
-        .route("/api/reload", post(reload_config))
-        .route("/api/self-update", post(self_update_handler))
-        .route("/api/restart", post(restart_handler))
-        .route("/api/version", get(version_handler))
+        .nest("/api", api)
         .with_state(state)
 }
