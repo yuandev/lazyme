@@ -35,9 +35,14 @@ pub struct RunSection {
     pub jvm_args: Option<String>,
     #[serde(default)]
     pub auto_restart: Option<bool>,
+    /// Graceful shutdown timeout in seconds. After SIGTERM, wait up to this
+    /// many seconds for the process to exit before sending SIGKILL.
+    #[serde(default = "default_kill_timeout")]
+    pub kill_timeout_secs: u64,
 }
 
 fn default_health_timeout() -> u64 { 30 }
+fn default_kill_timeout() -> u64 { 30 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WatchSection {

@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
         let run_mode = proj.run.mode.unwrap_or_else(|| "deploy".into());
         let run_mode_display = run_mode.clone();
 
+        let kill_timeout = proj.run.kill_timeout_secs;
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
             label: entry.label.clone().unwrap_or_else(|| entry.name.clone()),
@@ -109,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
             auto_deploy_paused: Mutex::new(false),
             health_status: Mutex::new(None),
             auto_restart,
+            kill_timeout_secs: kill_timeout,
             cached_local_head: Mutex::new(None),
             cached_remote_head: Mutex::new(None),
         });
@@ -360,6 +362,7 @@ pub async fn poll_loop(
             target.run_cmd.as_deref(),
             target.health_url.as_deref(),
             target.health_timeout,
+            target.kill_timeout_secs,
             jvm_args.as_deref(),
             Some(&envs),
             &target.run_mode,

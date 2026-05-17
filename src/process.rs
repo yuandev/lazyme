@@ -45,15 +45,36 @@ impl ManagedProcess {
     }
 
     pub fn kill(&mut self) {
+        self.kill_with_timeout(30);
+    }
+
+    /// Kill with a configurable graceful timeout in seconds.
+    /// Sends SIGTERM, polls is_running every 500ms up to timeout_secs, then SIGKILL.
+    pub fn kill_with_timeout(&mut self, timeout_secs: u64) {
         if let Some(ref mut child) = self.child {
             // Kill process group to ensure subprocesses (e.g. java) die too
             #[cfg(unix)]
             unsafe {
                 let pid = child.id() as i32;
                 libc::killpg(pid, libc::SIGTERM);
-                // Give a moment for graceful shutdown, then force
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                libc::killpg(pid, libc::SIGKILL);
+                // Poll for graceful shutdown
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break, // process exited
+                        Ok(None) => {
+                            if std::time::Instant::now() >= deadline {
+                                libc::killpg(pid, libc::SIGKILL);
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                        Err(_) => {
+                            libc::killpg(pid, libc::SIGKILL);
+                            break;
+                        }
+                    }
+                }
             }
             #[cfg(not(unix))]
             {

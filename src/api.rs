@@ -52,6 +52,7 @@ pub struct TargetState {
     pub auto_deploy_paused: Mutex<bool>,
     pub health_status: Mutex<Option<HealthStatus>>,
     pub auto_restart: bool,
+    pub kill_timeout_secs: u64,
     pub cached_remote_head: Mutex<Option<String>>,
     pub cached_local_head: Mutex<Option<String>>,
 }
@@ -407,7 +408,7 @@ async fn target_rollback(
     let envs = t.envs.lock().unwrap().clone();
 
     let used_cache = try_rollback_with_cache(
-        &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to,
+        &t.repo, &body.commit, artifact, &t.state, &t.process, run, health, health_to, t.kill_timeout_secs,
         jvm_args.as_deref(),
         Some(&envs),
     )
@@ -418,7 +419,7 @@ async fn target_rollback(
         build_and_cache(
             &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
-            &body.commit, &t.state, &t.process, run, health, health_to,
+            &body.commit, &t.state, &t.process, run, health, health_to, t.kill_timeout_secs,
             jvm_args.as_deref(),
             Some(&envs),
             &t.run_mode,
@@ -537,7 +538,7 @@ async fn target_deploy(
         &t.repo, &t.remote, &branch,
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
-        t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout,
+        t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout, t.kill_timeout_secs,
         jvm_args.as_deref(),
         Some(&envs),
         &t.run_mode,
@@ -580,6 +581,7 @@ pub async fn build_and_cache(
     run_cmd: Option<&str>,
     health_url: Option<&str>,
     health_timeout: u64,
+    kill_timeout: u64,
     jvm_args: Option<&str>,
     envs: Option<&HashMap<String, String>>,
     run_mode: &str,
@@ -728,7 +730,7 @@ pub async fn build_and_cache(
         if let Some(ref cmd) = run_cmd {
             let mut proc = process.lock().unwrap();
             if let Some(ref mut old) = *proc {
-                old.kill();
+                old.kill_with_timeout(kill_timeout);
             }
             let mut resolved = if let Some(art) = artifact_rel {
                 cmd.replace("{artifact}", &art.display().to_string())
@@ -803,6 +805,7 @@ pub fn try_rollback_with_cache(
     run_cmd: Option<&str>,
     _health_url: Option<&str>,
     _health_timeout: u64,
+    kill_timeout: u64,
     jvm_args: Option<&str>,
     envs: Option<&HashMap<String, String>>,
 ) -> anyhow::Result<bool> {
@@ -822,7 +825,7 @@ pub fn try_rollback_with_cache(
         if let Some(ref cmd) = run_cmd {
             let mut proc = process.lock().unwrap();
             if let Some(ref mut old) = *proc {
-                old.kill();
+                old.kill_with_timeout(kill_timeout);
             }
             let mut resolved = if let Some(art) = artifact_rel {
                 cmd.replace("{artifact}", &art.display().to_string())
@@ -1189,6 +1192,7 @@ async fn target_clone(
         cached_local_head: Mutex::new(None),
         cached_remote_head: Mutex::new(None),
         auto_restart: source.auto_restart,
+        kill_timeout_secs: source.kill_timeout_secs,
     });
 
     s.targets.write().unwrap().insert(new_name.clone(), ts.clone());
@@ -2049,6 +2053,7 @@ async fn target_create(
         cached_local_head: Mutex::new(None),
         cached_remote_head: Mutex::new(None),
         auto_restart: false,
+        kill_timeout_secs: 30,
     });
 
     s.targets.write().unwrap().insert(name.clone(), ts.clone());
