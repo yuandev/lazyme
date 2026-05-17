@@ -48,14 +48,23 @@ pub fn checkout(repo: &Path, commit: &str) -> Result<()> {
 fn force_checkout(repo: &Path, target: &str) -> Result<()> {
     let has_changes = !git(&["status", "--porcelain"], repo)
         .unwrap_or_default().is_empty();
+    let mut stashed = false;
     if has_changes {
-        let _ = git(&["stash", "push", "-m", "lazyme auto-stash before checkout"], repo);
+        stashed = git(&["stash", "push", "-m", "lazyme auto-stash before checkout"], repo).is_ok();
     }
-    let r = git(&["checkout", target], repo);
-    if has_changes {
-        let _ = git(&["stash", "pop"], repo);
+    let result = git(&["checkout", target], repo);
+    if stashed {
+        match git(&["stash", "pop"], repo) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "git stash pop failed in {}: {e}. Your changes are in `git stash list`.",
+                    repo.display()
+                );
+            }
+        }
     }
-    r?;
+    result?;
     Ok(())
 }
 
