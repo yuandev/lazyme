@@ -139,20 +139,55 @@ pub async fn health_check(url: &str, timeout_secs: u64) -> bool {
     false
 }
 
-/// Detect the actual listening TCP port for a given PID on Linux.
-/// Reads /proc/<pid>/net/tcp, finds LISTEN (0A) sockets, returns first port.
+/// Detect the actual listening TCP port for a given PID.
+/// Linux: reads /proc/<pid>/net/tcp
+/// macOS: uses lsof as fallback
 pub fn detect_port(pid: u32) -> Option<u16> {
+    // Linux: /proc/net/tcp
+    if let Some(port) = detect_port_linux(pid) {
+        return Some(port);
+    }
+    // macOS / BSD: lsof fallback
+    if let Some(port) = detect_port_lsof(pid) {
+        return Some(port);
+    }
+    None
+}
+
+fn detect_port_linux(pid: u32) -> Option<u16> {
     let path = format!("/proc/{pid}/net/tcp");
     let content = std::fs::read_to_string(&path).ok()?;
     for line in content.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        // sl local_address rem_address st ...
-        // local_address is hex like 00000000:1F90 (0.0.0.0:8080)
         if parts.len() >= 4 && parts[3] == "0A" {
-            // 0A = LISTEN
             if let Some(addr) = parts.get(1) {
                 if let Some(port_hex) = addr.split(':').nth(1) {
                     if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+                        return Some(port);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_port_lsof(pid: u32) -> Option<u16> {
+    let output = std::process::Command::new("lsof")
+        .args(["-i", "-P", "-n", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() { return None; }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Parse lines like: java  12345  user  123u  IPv6  0x...  TCP *:8080 (LISTEN)
+    for line in stdout.lines() {
+        if line.contains("(LISTEN)") {
+            // Extract port from the last field, format: *:8080 or 127.0.0.1:8080
+            if let Some(name) = line.split_whitespace().last() {
+                // Remove the "(LISTEN)" suffix if present
+                let addr = name.strip_suffix(" (LISTEN)").unwrap_or(name);
+                if let Some(port_str) = addr.rsplit(':').next() {
+                    if let Ok(port) = port_str.parse::<u16>() {
                         return Some(port);
                     }
                 }

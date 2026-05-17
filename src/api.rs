@@ -1314,6 +1314,18 @@ async fn queue_status(State(s): State<SharedState>) -> Json<QueueResponse> {
     })
 }
 
+// ── Health ──
+
+/// GET /api/health — daemon health check for external monitoring
+async fn health_handler(State(s): State<SharedState>) -> Json<serde_json::Value> {
+    let target_count = s.targets.read().unwrap().len();
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": crate::self_update::CURRENT_VERSION,
+        "targets": target_count,
+    }))
+}
+
 // ── Version ──
 
 /// GET /api/version
@@ -2130,6 +2142,7 @@ pub fn router(state: SharedState) -> Router {
 
     Router::new()
         .route("/ws", get(ws_handler))
+        .route("/api/health", get(health_handler))
         .nest("/api", api)
         .with_state(state)
 }
