@@ -100,7 +100,9 @@ impl StateManager {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&self.state)?;
-        std::fs::write(&self.state_path, json)?;
+        let tmp = self.state_path.with_extension("tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, &self.state_path)?;
         Ok(())
     }
 }

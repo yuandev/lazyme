@@ -8,6 +8,14 @@ pub struct ManagedProcess {
     started_at: Option<Instant>,
 }
 
+impl Drop for ManagedProcess {
+    fn drop(&mut self) {
+        if self.child.is_some() {
+            self.kill();
+        }
+    }
+}
+
 impl ManagedProcess {
     pub fn spawn(cmd: &str, repo: &Path, envs: Option<&HashMap<String, String>>) -> anyhow::Result<Self> {
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };

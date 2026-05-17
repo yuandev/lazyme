@@ -154,18 +154,20 @@ async fn main() -> anyhow::Result<()> {
     let app = api::router(shared).fallback(serve_frontend);
 
     // Try ports starting from the configured port, auto-increment if in use
-    let addr = format!("0.0.0.0:{}", args.port);
+    let mut port = args.port;
     let listener = loop {
+        let addr = format!("0.0.0.0:{port}");
         match tokio::net::TcpListener::bind(&addr).await {
             Ok(l) => break l,
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                warn!("Port {} in use, retrying in 1s...", args.port);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                warn!("Port {port} in use, trying next...");
+                port += 1;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             }
             Err(e) => return Err(e.into()),
         }
     };
-    info!("Web UI listening at http://localhost:{}", args.port);
+    info!("Web UI listening at http://localhost:{port}");
     axum::serve(listener, app).await?;
 
     Ok(())
