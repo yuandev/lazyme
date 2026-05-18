@@ -21,6 +21,8 @@ pub struct DeploymentState {
     pub history: Vec<DeployRecord>,
 }
 
+const MAX_HISTORY: usize = 50;
+
 pub struct StateManager {
     state_path: PathBuf,
     data_dir: PathBuf,
@@ -90,9 +92,35 @@ impl StateManager {
         if self.state.current.is_some() {
             self.state.history.push(self.state.current.clone().unwrap());
         }
+        // Prune old history
+        while self.state.history.len() > MAX_HISTORY {
+            self.state.history.remove(0);
+        }
         self.state.current = Some(record);
         self.save()?;
+
+        // Prune old log files
+        self.prune_logs();
         Ok(())
+    }
+
+    fn prune_logs(&self) {
+        let log_dir = self.data_dir.join("logs");
+        if !log_dir.exists() {
+            return;
+        }
+        let mut entries: Vec<_> = match std::fs::read_dir(&log_dir) {
+            Ok(iter) => iter.filter_map(|e| e.ok()).collect(),
+            Err(_) => return,
+        };
+        // Sort by modification time, oldest first
+        entries.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+        while entries.len() > MAX_HISTORY {
+            if let Some(oldest) = entries.first() {
+                let _ = std::fs::remove_file(oldest.path());
+                entries.remove(0);
+            }
+        }
     }
 
     fn save(&self) -> Result<()> {

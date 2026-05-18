@@ -51,10 +51,14 @@ pub struct RunSection {
     /// (e.g. cache warm, notification, smoke test).
     #[serde(default)]
     pub post_deploy_cmd: Option<String>,
+    /// Maximum build time in seconds. Build is killed if it exceeds this.
+    #[serde(default = "default_build_timeout")]
+    pub build_timeout_secs: u64,
 }
 
 fn default_health_timeout() -> u64 { 30 }
 fn default_kill_timeout() -> u64 { 30 }
+fn default_build_timeout() -> u64 { 600 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WatchSection {

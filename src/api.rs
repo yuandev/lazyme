@@ -53,6 +53,7 @@ pub struct TargetState {
     pub health_status: Mutex<Option<HealthStatus>>,
     pub auto_restart: bool,
     pub kill_timeout_secs: u64,
+    pub build_timeout_secs: u64,
     pub webhook_url: Option<String>,
     pub pre_deploy_cmd: Option<String>,
     pub post_deploy_cmd: Option<String>,
@@ -477,6 +478,7 @@ async fn target_rollback(
             &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to, t.kill_timeout_secs,
+            t.build_timeout_secs,
             t.webhook_url.as_deref(),
             t.pre_deploy_cmd.as_deref(),
             t.post_deploy_cmd.as_deref(),
@@ -599,6 +601,7 @@ async fn target_deploy(
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout, t.kill_timeout_secs,
+        t.build_timeout_secs,
         t.webhook_url.as_deref(),
         t.pre_deploy_cmd.as_deref(),
         t.post_deploy_cmd.as_deref(),
@@ -645,6 +648,7 @@ pub async fn build_and_cache(
     health_url: Option<&str>,
     health_timeout: u64,
     kill_timeout: u64,
+    build_timeout: u64,
     webhook_url: Option<&str>,
     pre_deploy_cmd: Option<&str>,
     post_deploy_cmd: Option<&str>,
@@ -715,51 +719,69 @@ pub async fn build_and_cache(
             });
         }
 
-        use std::io::{BufRead, BufReader};
-        let mut child = Command::new(shell)
-            .args([flag, &resolved_build])
-            .current_dir(repo)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
+        let shell2 = shell.to_string();
+        let flag2 = flag.to_string();
+        let resolved_build2 = resolved_build.clone();
+        let repo_build = repo.to_path_buf();
+        let tx_build = tx.cloned();
+        let target_name_build = target_name.to_string();
+        let short_build = short.clone();
 
-        // Read stdout line by line, broadcast and buffer
-        let stdout = child.stdout.take().unwrap();
-        let reader = BufReader::new(stdout);
-        let mut log_buf = String::new();
-        for line_res in reader.lines() {
-            let line = line_res.unwrap_or_default();
-            if let Some(tx) = tx {
-                let _ = tx.send(WsEvent {
-                    event: "build_output".into(),
-                    target: target_name.into(),
-                    commit: Some(short.clone()),
-                    message: Some(line.clone()),
-                });
-            }
-            log_buf.push_str(&line);
-            log_buf.push('\n');
-        }
-        // Also read stderr
-        if let Some(stderr) = child.stderr.take() {
-            let err_reader = BufReader::new(stderr);
-            for line_res in err_reader.lines() {
+        let build_task = tokio::task::spawn_blocking(move || -> anyhow::Result<(bool, String)> {
+            use std::io::{BufRead, BufReader};
+            let mut child = Command::new(&shell2)
+                .args([&flag2, &resolved_build2])
+                .current_dir(&repo_build)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+
+            let stdout = child.stdout.take().unwrap();
+            let reader = BufReader::new(stdout);
+            let mut log_buf = String::new();
+            for line_res in reader.lines() {
                 let line = line_res.unwrap_or_default();
-                if let Some(tx) = tx {
+                if let Some(ref tx) = tx_build {
                     let _ = tx.send(WsEvent {
                         event: "build_output".into(),
-                        target: target_name.into(),
-                        commit: Some(short.clone()),
+                        target: target_name_build.clone(),
+                        commit: Some(short_build.clone()),
                         message: Some(line.clone()),
                     });
                 }
                 log_buf.push_str(&line);
                 log_buf.push('\n');
             }
-        }
+            if let Some(stderr) = child.stderr.take() {
+                let err_reader = BufReader::new(stderr);
+                for line_res in err_reader.lines() {
+                    let line = line_res.unwrap_or_default();
+                    if let Some(ref tx) = tx_build {
+                        let _ = tx.send(WsEvent {
+                            event: "build_output".into(),
+                            target: target_name_build.clone(),
+                            commit: Some(short_build.clone()),
+                            message: Some(line.clone()),
+                        });
+                    }
+                    log_buf.push_str(&line);
+                    log_buf.push('\n');
+                }
+            }
 
-        let status = child.wait()?;
-        let success = status.success();
+            let status = child.wait()?;
+            Ok((status.success(), log_buf))
+        });
+
+        let (success, log_buf) = match tokio::time::timeout(
+            std::time::Duration::from_secs(build_timeout),
+            build_task,
+        ).await {
+            Ok(Ok(Ok((success, log_buf)))) => (success, log_buf),
+            Ok(Ok(Err(e))) => return Err(e),
+            Ok(Err(_)) => anyhow::bail!("build panicked"),
+            Err(_) => anyhow::bail!("build timed out after {build_timeout}s"),
+        };
 
         // Send build log end event
         if let Some(tx) = tx {
@@ -1282,6 +1304,7 @@ async fn target_clone(
         cached_remote_head: Mutex::new(None),
         auto_restart: source.auto_restart,
         kill_timeout_secs: source.kill_timeout_secs,
+        build_timeout_secs: source.build_timeout_secs,
         webhook_url: source.webhook_url.clone(),
         pre_deploy_cmd: source.pre_deploy_cmd.clone(),
         post_deploy_cmd: source.post_deploy_cmd.clone(),
@@ -2148,6 +2171,7 @@ async fn target_create(
         cached_remote_head: Mutex::new(None),
         auto_restart: false,
         kill_timeout_secs: 30,
+        build_timeout_secs: 600,
         webhook_url: None,
         pre_deploy_cmd: None,
         post_deploy_cmd: None,

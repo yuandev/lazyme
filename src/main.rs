@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
         let run_mode_display = run_mode.clone();
 
         let kill_timeout = proj.run.kill_timeout_secs;
+        let build_timeout = proj.run.build_timeout_secs;
         let webhook_url = proj.run.webhook_url.clone();
         let pre_deploy_cmd = proj.run.pre_deploy_cmd.clone();
         let post_deploy_cmd = proj.run.post_deploy_cmd.clone();
@@ -114,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
             health_status: Mutex::new(None),
             auto_restart,
             kill_timeout_secs: kill_timeout,
+            build_timeout_secs: build_timeout,
             webhook_url,
             pre_deploy_cmd,
             post_deploy_cmd,
@@ -369,6 +371,7 @@ pub async fn poll_loop(
             target.health_url.as_deref(),
             target.health_timeout,
             target.kill_timeout_secs,
+            target.build_timeout_secs,
             target.webhook_url.as_deref(),
             target.pre_deploy_cmd.as_deref(),
             target.post_deploy_cmd.as_deref(),
