@@ -53,6 +53,7 @@ pub struct TargetState {
     pub health_status: Mutex<Option<HealthStatus>>,
     pub auto_restart: bool,
     pub kill_timeout_secs: u64,
+    pub webhook_url: Option<String>,
     pub cached_remote_head: Mutex<Option<String>>,
     pub cached_local_head: Mutex<Option<String>>,
 }
@@ -61,6 +62,43 @@ pub struct TargetState {
 pub struct HealthStatus {
     pub ok: bool,
     pub last_check: String,
+}
+
+fn notify_webhook(url: &str, event: &str, target: &str, commit: &str, duration: u64, error: Option<&str>) {
+    let url = url.to_string();
+    let event = event.to_string();
+    let target = target.to_string();
+    let commit = commit.to_string();
+    let error = error.map(|e| e.to_string());
+    let payload = if let Some(ref err) = error {
+        serde_json::json!({
+            "event": event,
+            "target": target,
+            "commit": commit,
+            "duration_secs": duration,
+            "error": err,
+        })
+    } else {
+        serde_json::json!({
+            "event": event,
+            "target": target,
+            "commit": commit,
+            "duration_secs": duration,
+        })
+    };
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .user_agent("lazyme")
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if let Err(e) = client.post(&url).json(&payload).send().await {
+            tracing::warn!("webhook notification failed for {target}: {e}");
+        }
+    });
 }
 
 fn detect_service_type(run_cmd: Option<&str>) -> String {
@@ -420,6 +458,7 @@ async fn target_rollback(
             &t.repo, &t.remote, &branch,
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to, t.kill_timeout_secs,
+            t.webhook_url.as_deref(),
             jvm_args.as_deref(),
             Some(&envs),
             &t.run_mode,
@@ -539,6 +578,7 @@ async fn target_deploy(
         &t.build_cmd, t.artifact.as_deref(),
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout, t.kill_timeout_secs,
+        t.webhook_url.as_deref(),
         jvm_args.as_deref(),
         Some(&envs),
         &t.run_mode,
@@ -582,6 +622,7 @@ pub async fn build_and_cache(
     health_url: Option<&str>,
     health_timeout: u64,
     kill_timeout: u64,
+    webhook_url: Option<&str>,
     jvm_args: Option<&str>,
     envs: Option<&HashMap<String, String>>,
     run_mode: &str,
@@ -786,12 +827,19 @@ pub async fn build_and_cache(
     let duration = if is_dev { None } else { Some(build_start.elapsed().as_secs()) };
     st.record_deploy(
         commit_hash.to_string(),
-        short,
+        short.clone(),
         cache_path,
         log_path,
         success,
         duration,
     )?;
+
+    // Webhook notification
+    if let Some(url) = webhook_url {
+        let event = if success { "deploy_success" } else { "deploy_failure" };
+        let dur = duration.unwrap_or(0);
+        notify_webhook(url, event, target_name, &short, dur, None);
+    }
 
     Ok(())
 }
@@ -1193,6 +1241,7 @@ async fn target_clone(
         cached_remote_head: Mutex::new(None),
         auto_restart: source.auto_restart,
         kill_timeout_secs: source.kill_timeout_secs,
+        webhook_url: source.webhook_url.clone(),
     });
 
     s.targets.write().unwrap().insert(new_name.clone(), ts.clone());
@@ -2066,6 +2115,7 @@ async fn target_create(
         cached_remote_head: Mutex::new(None),
         auto_restart: false,
         kill_timeout_secs: 30,
+        webhook_url: None,
     });
 
     s.targets.write().unwrap().insert(name.clone(), ts.clone());

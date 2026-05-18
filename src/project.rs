@@ -39,6 +39,10 @@ pub struct RunSection {
     /// many seconds for the process to exit before sending SIGKILL.
     #[serde(default = "default_kill_timeout")]
     pub kill_timeout_secs: u64,
+    /// Webhook URL to POST deploy success/failure notifications.
+    /// Supports Slack, Discord, DingTalk, Feishu, or any HTTP endpoint.
+    #[serde(default)]
+    pub webhook_url: Option<String>,
 }
 
 fn default_health_timeout() -> u64 { 30 }
