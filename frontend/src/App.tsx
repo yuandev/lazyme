@@ -14,6 +14,13 @@ import { I18nProvider, useI18n, tf } from './i18n';
 
 const REFRESH_MS = 8_000;
 
+function formatMemory(kb: number | null): string {
+  if (kb == null) return '';
+  if (kb >= 1048576) return `${(kb / 1048576).toFixed(1)} GB`;
+  if (kb >= 1024) return `${Math.round(kb / 1024)} MB`;
+  return `${kb} KB`;
+}
+
 type UpdatePhase = null | 'checking' | 'downloading' | 'complete' | 'error';
 interface UpdateState {
   phase: UpdatePhase;
@@ -155,6 +162,11 @@ function AppInner() {
               + {t.newTarget}
             </button>
           </div>
+          {(() => {
+            const totalKb = targets.reduce((sum, tg) => sum + (tg.memory_kb ?? 0), 0);
+            if (totalKb === 0) return null;
+            return <div style={{ fontSize: 11, color: '#60a5fa', fontFamily: 'monospace', padding: '0 4px 8px' }}>MEM {formatMemory(totalKb)}</div>;
+          })()}
           {(() => {
             const groups = new Map<string | null, TargetSummary[]>();
             for (const tg of targets) {
@@ -694,6 +706,7 @@ const S: Record<string, React.CSSProperties> = {
   typeTag: { fontSize: 9, padding: '0 5px', borderRadius: 3, background: '#1f1f2a', color: '#6b7280', fontFamily: 'monospace', fontWeight: 600, textTransform: 'uppercase' },
   targetBranch: { fontSize: 11, color: '#6b7280' },
   targetHash: { fontSize: 10, color: '#4b5563', fontFamily: 'monospace' },
+  targetMem: { fontSize: 10, color: '#6b7280', fontFamily: 'monospace', paddingTop: 1 },
   badgeOn: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 700, background: '#052e16', color: '#4ade80', whiteSpace: 'nowrap' },
   badgeOff: { display: 'inline-flex', alignItems: 'center', gap: 3, padding: '1px 7px', borderRadius: 4, fontSize: 10, fontWeight: 700, background: '#1f1f1f', color: '#6b7280', whiteSpace: 'nowrap' },
   cloneBtn: { width: 28, height: 28, border: '1px solid #1f1f2a', borderRadius: 6, cursor: 'pointer', fontSize: 14, background: '#0c0c10', color: '#4b5563', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all 0.15s' },

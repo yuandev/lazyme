@@ -162,6 +162,7 @@ struct TargetSummary {
     group: Option<String>,
     service_type: String,
     health_ok: Option<bool>,
+    memory_kb: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -191,6 +192,7 @@ struct StatusResponse {
     service_type: String,
     pid: Option<u32>,
     uptime_secs: Option<u64>,
+    memory_kb: Option<u64>,
     health_status: Option<HealthStatus>,
 }
 
@@ -278,7 +280,14 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
         .iter()
         .map(|(_, t)| {
             let st = t.state.lock().unwrap();
-            let running = t.process.lock().unwrap().as_mut().map_or(false, |p| p.is_running());
+            let (running, memory_kb) = {
+                let mut proc = t.process.lock().unwrap();
+                let running = proc.as_mut().map_or(false, |p| p.is_running());
+                let mem = proc.as_ref()
+                    .and_then(|p| p.pid())
+                    .and_then(process::memory_rss_kb);
+                (running, mem)
+            };
             let health_ok = t.health_status.lock().unwrap().as_ref().map(|hs| hs.ok);
             TargetSummary {
                 name: t.name.clone(),
@@ -293,6 +302,7 @@ async fn list_targets(State(s): State<SharedState>) -> Json<TargetListResponse> 
                 group: t.group.clone(),
                 service_type: detect_service_type(t.run_cmd.as_deref()),
                 health_ok,
+                memory_kb,
             }
         })
         .collect();
@@ -318,6 +328,7 @@ async fn target_status(
             (false, None, None)
         }
     };
+    let memory_kb = pid.and_then(process::memory_rss_kb);
     // On-demand health check when viewing target detail
     let health_status = if let Some(ref url) = t.health_url {
         let pid = {
@@ -370,6 +381,7 @@ async fn target_status(
         service_type: detect_service_type(t.run_cmd.as_deref()),
         pid,
         uptime_secs: uptime,
+        memory_kb,
         health_status,
     }))
 }
@@ -589,47 +601,58 @@ async fn target_deploy(
         message: None,
     });
 
-    // Serialize builds
-    let _guard = s.build_lock.inner.lock().await;
-    s.build_lock.set_current(Some(t.name.clone()));
+    // Spawn build in background so the HTTP response is immediate.
+    // Frontend tracks progress via WebSocket events.
+    let tx = s.tx.clone();
+    let build_lock = s.build_lock.clone();
+    let t_arc = t.clone();
+    let branch_val = branch.to_string();
+    let commit_for_response = remote.clone();
 
-    let jvm_args = t.jvm_args.lock().unwrap().clone();
-    let envs = t.envs.lock().unwrap().clone();
+    tokio::spawn(async move {
+        let _guard = build_lock.inner.lock().await;
+        build_lock.set_current(Some(t_arc.name.clone()));
 
-    build_and_cache(
-        &t.repo, &t.remote, &branch,
-        &t.build_cmd, t.artifact.as_deref(),
-        &remote, &t.state, &t.process,
-        t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout, t.kill_timeout_secs,
-        t.build_timeout_secs,
-        t.webhook_url.as_deref(),
-        t.pre_deploy_cmd.as_deref(),
-        t.post_deploy_cmd.as_deref(),
-        jvm_args.as_deref(),
-        Some(&envs),
-        &t.run_mode,
-        Some(&s.tx), &t.name,
-        Some(&t.health_status),
-    )
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let jvm_args = t_arc.jvm_args.lock().unwrap().clone();
+        let envs = t_arc.envs.lock().unwrap().clone();
 
-    s.build_lock.set_current(None);
-    drop(_guard);
+        if let Err(e) = build_and_cache(
+            &t_arc.repo, &t_arc.remote, &branch_val,
+            &t_arc.build_cmd, t_arc.artifact.as_deref(),
+            &remote, &t_arc.state, &t_arc.process,
+            t_arc.run_cmd.as_deref(), t_arc.health_url.as_deref(), t_arc.health_timeout,
+            t_arc.kill_timeout_secs,
+            t_arc.build_timeout_secs,
+            t_arc.webhook_url.as_deref(),
+            t_arc.pre_deploy_cmd.as_deref(),
+            t_arc.post_deploy_cmd.as_deref(),
+            jvm_args.as_deref(),
+            Some(&envs),
+            &t_arc.run_mode,
+            Some(&tx), &t_arc.name,
+            Some(&t_arc.health_status),
+        )
+        .await
+        {
+            tracing::error!("[{name}] build/deploy failed: {e}", name = t_arc.name);
+        }
 
-    // Resume auto-deploy when deploying latest
-    *t.auto_deploy_paused.lock().unwrap() = false;
+        build_lock.set_current(None);
+        drop(_guard);
 
-    let _ = s.tx.send(WsEvent {
-        event: "deploy_complete".into(),
-        target: t.name.clone(),
-        commit: Some(remote.clone()),
-        message: None,
+        *t_arc.auto_deploy_paused.lock().unwrap() = false;
+
+        let _ = tx.send(WsEvent {
+            event: "deploy_complete".into(),
+            target: t_arc.name.clone(),
+            commit: Some(remote),
+            message: None,
+        });
     });
 
     Ok(Json(RollbackResponse {
-        status: "ok".into(),
-        commit: remote,
+        status: "accepted".into(),
+        commit: commit_for_response,
     }))
 }
 
@@ -659,7 +682,6 @@ pub async fn build_and_cache(
     target_name: &str,
     health_status: Option<&Mutex<Option<HealthStatus>>>,
 ) -> anyhow::Result<()> {
-    use std::process::Command;
 
     let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
     let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
@@ -729,7 +751,7 @@ pub async fn build_and_cache(
 
         let build_task = tokio::task::spawn_blocking(move || -> anyhow::Result<(bool, String)> {
             use std::io::{BufRead, BufReader};
-            let mut child = Command::new(&shell2)
+            let mut child = std::process::Command::new(&shell2)
                 .args([&flag2, &resolved_build2])
                 .current_dir(&repo_build)
                 .stdout(std::process::Stdio::piped())
@@ -821,12 +843,30 @@ pub async fn build_and_cache(
                 .map(|s| s.to_string())
         });
 
+    // Extract target port from health_url for port cleanup (needed for dev mode
+    // where jvm_args may not contain -Dserver.port)
+    let health_port = health_url
+        .and_then(|url| process::parse_host_port(url))
+        .map(|(_, p)| p);
+
     if success {
         if let Some(ref cmd) = run_cmd {
             let mut proc = process.lock().unwrap();
-            if let Some(ref mut old) = *proc {
-                old.kill_with_timeout(kill_timeout);
-            }
+            let running = proc.as_mut().map_or(false, |p| p.is_running());
+
+            // Dev mode: HMR handles file changes. Only restart if crashed.
+            let should_restart = !is_dev || !running;
+
+            if should_restart {
+                if !is_dev {
+                    // Deploy mode: kill old process and clean up port
+                    if let Some(ref mut old) = *proc {
+                        old.kill_with_timeout(kill_timeout);
+                    }
+                    if let Some(p) = health_port.or(port.as_ref().and_then(|s| s.parse().ok())) {
+                        process::kill_port(p);
+                    }
+                }
             let mut resolved = if let Some(art) = artifact_rel {
                 cmd.replace("{artifact}", &art.display().to_string())
             } else {
@@ -838,10 +878,11 @@ pub async fn build_and_cache(
             if let Some(ref p) = port {
                 resolved = resolved.replace("{port}", p);
             }
-            match ManagedProcess::spawn(&resolved, repo, envs) {
-                Ok(p) => *proc = Some(p),
-                Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
-            }
+                match ManagedProcess::spawn(&resolved, repo, envs) {
+                    Ok(p) => *proc = Some(p),
+                    Err(e) => tracing::warn!("Failed to spawn run command: {e}"),
+                }
+            } // should_restart
             drop(proc);
         }
     }
@@ -1262,9 +1303,11 @@ async fn target_clone(
         table.insert("watch".into(), toml::Value::Table(watch));
     }
 
-    let config_path = repo.join(".deployd").join(format!("config.{new_name}.toml"));
-    std::fs::create_dir_all(config_path.parent().unwrap())
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let config_path = crate::project::target_config_path(&new_name);
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
     std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1722,8 +1765,13 @@ async fn target_put_env(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    // Load existing config from standard location, update run.jvm_args and [env]
+    // Load existing config from per-target location, update run.jvm_args and [env], write back
     let config_path = crate::project::target_config_path(&t.name);
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+
     let mut table: toml::Table = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

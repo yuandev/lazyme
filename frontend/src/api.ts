@@ -26,6 +26,7 @@ export interface TargetSummary {
   group: string | null;
   service_type: string;
   health_ok: boolean | null;
+  memory_kb: number | null;
 }
 
 export interface TargetListResponse {
@@ -53,6 +54,7 @@ export interface StatusResponse {
   service_type: string;
   pid: number | null;
   uptime_secs: number | null;
+  memory_kb: number | null;
   health_status: HealthStatus | null;
 }
 

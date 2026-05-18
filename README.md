@@ -138,11 +138,12 @@ Options:
 
 ### Web Dashboard
 
-- **Status tab**: live view of deployed commit, git state, build/run commands, JVM args, env vars, PID and uptime
+- **Status tab**: live view of deployed commit, git state, build/run commands, JVM args, env vars, PID, uptime, and memory (VmRSS)
+- **Sidebar**: grouped service cards with online/offline badges and total memory
 - **Online/offline indicator**: green/red badge based on real TCP health check (polled every interval)
 - **Commits tab**: recent commits with one-click deploy/rollback and build log viewer
 - **History tab**: deployment history with cache status, build duration, and log access
-- **Config tab**: edit config.toml, Maven settings, vite.config.ts, JVM args, and env vars
+- **Config tab**: edit target config, Maven settings, vite.config.ts, JVM args, and env vars
 - **Add target**: modal form to create a new target with optional git clone
 - **Rename / Clone / Delete**: sidebar buttons per target; delete shows stop → verify → remove flow
 - **Branch switch**: dropdown with remote branches, refresh button, auto-creates local tracking branch
@@ -159,7 +160,16 @@ Options:
 
 ### Dev Mode
 
-Set `mode = "dev"` in `[run]` to skip the build step. On new commits, lazyme pulls and restarts the run command directly — ideal for Node.js, Python, or any interpreted language.
+Set `mode = "dev"` in `[run]` to skip the build step. On new commits, lazyme pulls the latest code but does **not** restart the process — HMR (Vite, nodemon, etc.) handles file changes automatically. Restart only happens if the process crashes.
+
+### Process Recovery
+
+After restart, lazyme detects already-running services via multi-factor verification:
+1. Check the configured TCP port (`fuser`)
+2. Match by artifact keyword (`pgrep -f`)
+3. Follow shell wrapper → actual Java PID via `/proc`
+
+Recovered processes show accurate memory (VmRSS) and health status, and won't trigger re-deployment.
 
 ## Configuration Files
 

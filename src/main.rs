@@ -184,6 +184,24 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve the TCP port a target should be listening on.
+/// Checks jvm_args (-Dserver.port=) first, then health_url.
+fn resolve_target_port(target: &TargetState) -> Option<u16> {
+    if let Some(s) = target.jvm_args.lock().unwrap().as_ref()
+        .and_then(|ja| ja.split_whitespace()
+            .find(|a| a.starts_with("-Dserver.port="))
+            .and_then(|a| a.split('=').nth(1)))
+    {
+        if let Ok(p) = s.parse() { return Some(p); }
+    }
+    if let Some(ref url) = target.health_url {
+        if let Some((_, p)) = process::parse_host_port(url) {
+            return Some(p);
+        }
+    }
+    None
+}
+
 pub async fn poll_loop(
     target: Arc<TargetState>,
     interval_secs: u64,
@@ -195,6 +213,27 @@ pub async fn poll_loop(
         let jitter: i64 = rand::random::<u64>() as i64 % 17 - 8;
         let sleep_secs = (interval_secs as i64 + jitter).max(1) as u64;
         tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+
+        // Recover process after restart: if handle is gone, detect via
+        // multi-factor: (1) configured port, (2) artifact keyword
+        {
+            let mut proc = target.process.lock().unwrap();
+            let gone = proc.as_mut().map_or(true, |p| !p.is_running());
+            if gone {
+                let recovered = resolve_target_port(&target)
+                    .and_then(process::pid_by_port)
+                    .or_else(|| {
+                        target.artifact.as_ref().and_then(|a| {
+                            let keyword = a.file_name()?.to_str()?;
+                            process::pid_by_keyword(keyword)
+                        })
+                    });
+                if let Some(pid) = recovered {
+                    info!("[{}] recovered process (pid={pid})", target.name);
+                    *proc = Some(process::ManagedProcess::from_recovered(pid));
+                }
+            }
+        }
 
         // Periodic health check (runs every poll interval, not just on deploy)
         if let Some(ref url) = target.health_url {
@@ -262,7 +301,7 @@ pub async fn poll_loop(
             }
         };
 
-        let remote = match remote_head_result {
+        let remote_head = match remote_head_result {
             Ok(h) => {
                 *target.cached_remote_head.lock().unwrap() = Some(h.clone());
                 h
@@ -273,7 +312,7 @@ pub async fn poll_loop(
             }
         };
 
-        if remote.is_empty() {
+        if remote_head.is_empty() {
             continue;
         }
 
@@ -312,7 +351,7 @@ pub async fn poll_loop(
             }
         }
 
-        if deployed.as_deref() == Some(&remote) {
+        if deployed.as_deref() == Some(&remote_head) {
             continue;
         }
 
@@ -321,7 +360,7 @@ pub async fn poll_loop(
             continue;
         }
 
-        info!("[{}] new commit: {remote}, pulling...", target.name);
+        info!("[{}] new commit: {remote_head}, pulling...", target.name);
 
         {
             let repo = repo2.clone();
@@ -364,7 +403,7 @@ pub async fn poll_loop(
             &branch,
             &target.build_cmd,
             target.artifact.as_deref(),
-            &remote,
+            &remote_head,
             &target.state,
             &target.process,
             target.run_cmd.as_deref(),
@@ -386,7 +425,7 @@ pub async fn poll_loop(
         {
             error!("[{}] build/deploy failed: {e}", target.name);
         } else {
-            info!("[{}] deployed {remote}", target.name);
+            info!("[{}] deployed {remote_head}", target.name);
         }
 
         build_lock.set_current(None);
