@@ -89,7 +89,7 @@ function authHeaders(): Record<string, string> {
   return t ? { 'Authorization': `Bearer ${t}` } : {};
 }
 
-function wsToken(): string {
+export function wsToken(): string {
   const t = token();
   return t ? `?token=${encodeURIComponent(t)}` : '';
 }
