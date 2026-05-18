@@ -1699,18 +1699,8 @@ async fn target_put_env(
         .cloned()
         .ok_or((StatusCode::NOT_FOUND, "target not found".into()))?;
 
-    // Load existing config toml, update run.jvm_args and [env], write back
-    let deploy_dir = t.repo.join(".deployd");
-    let config_path = if let Some(ref p) = t.profile {
-        let profiled = deploy_dir.join(format!("config.{p}.toml"));
-        if profiled.exists() { profiled } else { deploy_dir.join("config.toml") }
-    } else {
-        deploy_dir.join("config.toml")
-    };
-
-    std::fs::create_dir_all(&deploy_dir)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
+    // Load existing config from standard location, update run.jvm_args and [env]
+    let config_path = crate::project::target_config_path(&t.name);
     let mut table: toml::Table = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -1744,7 +1734,7 @@ async fn target_put_env(
         }
     }
 
-    std::fs::write(&config_path, toml::to_string_pretty(&table).unwrap())
+    crate::project::ProjectConfig::save_config(&t.name, &toml::to_string_pretty(&table).unwrap())
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Update live target state
