@@ -90,6 +90,8 @@ async fn main() -> anyhow::Result<()> {
 
         let kill_timeout = proj.run.kill_timeout_secs;
         let webhook_url = proj.run.webhook_url.clone();
+        let pre_deploy_cmd = proj.run.pre_deploy_cmd.clone();
+        let post_deploy_cmd = proj.run.post_deploy_cmd.clone();
         let ts = Arc::new(TargetState {
             name: entry.name.clone(),
             label: entry.label.clone().unwrap_or_else(|| entry.name.clone()),
@@ -113,6 +115,8 @@ async fn main() -> anyhow::Result<()> {
             auto_restart,
             kill_timeout_secs: kill_timeout,
             webhook_url,
+            pre_deploy_cmd,
+            post_deploy_cmd,
             cached_local_head: Mutex::new(None),
             cached_remote_head: Mutex::new(None),
         });
@@ -366,6 +370,8 @@ pub async fn poll_loop(
             target.health_timeout,
             target.kill_timeout_secs,
             target.webhook_url.as_deref(),
+            target.pre_deploy_cmd.as_deref(),
+            target.post_deploy_cmd.as_deref(),
             jvm_args.as_deref(),
             Some(&envs),
             &target.run_mode,

@@ -43,6 +43,14 @@ pub struct RunSection {
     /// Supports Slack, Discord, DingTalk, Feishu, or any HTTP endpoint.
     #[serde(default)]
     pub webhook_url: Option<String>,
+    /// Command to run before building (e.g. backup, migration).
+    /// Runs in the repo directory with `sh -c`.
+    #[serde(default)]
+    pub pre_deploy_cmd: Option<String>,
+    /// Command to run after successful deploy and health check
+    /// (e.g. cache warm, notification, smoke test).
+    #[serde(default)]
+    pub post_deploy_cmd: Option<String>,
 }
 
 fn default_health_timeout() -> u64 { 30 }

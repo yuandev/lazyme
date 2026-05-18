@@ -54,6 +54,8 @@ pub struct TargetState {
     pub auto_restart: bool,
     pub kill_timeout_secs: u64,
     pub webhook_url: Option<String>,
+    pub pre_deploy_cmd: Option<String>,
+    pub post_deploy_cmd: Option<String>,
     pub cached_remote_head: Mutex<Option<String>>,
     pub cached_local_head: Mutex<Option<String>>,
 }
@@ -62,6 +64,23 @@ pub struct TargetState {
 pub struct HealthStatus {
     pub ok: bool,
     pub last_check: String,
+}
+
+fn run_hook(cmd: &str, repo: &std::path::Path) {
+    let shell = if cfg!(target_os = "windows") { "cmd" } else { "sh" };
+    let flag = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+    match std::process::Command::new(shell)
+        .args([flag, cmd])
+        .current_dir(repo)
+        .output()
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            tracing::warn!("hook failed (exit {}): {}", o.status, stderr.trim());
+        }
+        Err(e) => tracing::warn!("hook spawn failed: {e}"),
+    }
 }
 
 fn notify_webhook(url: &str, event: &str, target: &str, commit: &str, duration: u64, error: Option<&str>) {
@@ -459,6 +478,8 @@ async fn target_rollback(
             &t.build_cmd, artifact,
             &body.commit, &t.state, &t.process, run, health, health_to, t.kill_timeout_secs,
             t.webhook_url.as_deref(),
+            t.pre_deploy_cmd.as_deref(),
+            t.post_deploy_cmd.as_deref(),
             jvm_args.as_deref(),
             Some(&envs),
             &t.run_mode,
@@ -579,6 +600,8 @@ async fn target_deploy(
         &remote, &t.state, &t.process,
         t.run_cmd.as_deref(), t.health_url.as_deref(), t.health_timeout, t.kill_timeout_secs,
         t.webhook_url.as_deref(),
+        t.pre_deploy_cmd.as_deref(),
+        t.post_deploy_cmd.as_deref(),
         jvm_args.as_deref(),
         Some(&envs),
         &t.run_mode,
@@ -623,6 +646,8 @@ pub async fn build_and_cache(
     health_timeout: u64,
     kill_timeout: u64,
     webhook_url: Option<&str>,
+    pre_deploy_cmd: Option<&str>,
+    post_deploy_cmd: Option<&str>,
     jvm_args: Option<&str>,
     envs: Option<&HashMap<String, String>>,
     run_mode: &str,
@@ -649,6 +674,13 @@ pub async fn build_and_cache(
                 commit: Some(short.clone()),
                 message: None,
             });
+        }
+    }
+
+    // Pre-deploy hook
+    if let Some(ref cmd) = pre_deploy_cmd {
+        if !cmd.is_empty() {
+            run_hook(cmd, repo);
         }
     }
 
@@ -833,6 +865,15 @@ pub async fn build_and_cache(
         success,
         duration,
     )?;
+
+    // Post-deploy hook (only on success)
+    if success {
+        if let Some(ref cmd) = post_deploy_cmd {
+            if !cmd.is_empty() {
+                run_hook(cmd, repo);
+            }
+        }
+    }
 
     // Webhook notification
     if let Some(url) = webhook_url {
@@ -1242,6 +1283,8 @@ async fn target_clone(
         auto_restart: source.auto_restart,
         kill_timeout_secs: source.kill_timeout_secs,
         webhook_url: source.webhook_url.clone(),
+        pre_deploy_cmd: source.pre_deploy_cmd.clone(),
+        post_deploy_cmd: source.post_deploy_cmd.clone(),
     });
 
     s.targets.write().unwrap().insert(new_name.clone(), ts.clone());
@@ -2116,6 +2159,8 @@ async fn target_create(
         auto_restart: false,
         kill_timeout_secs: 30,
         webhook_url: None,
+        pre_deploy_cmd: None,
+        post_deploy_cmd: None,
     });
 
     s.targets.write().unwrap().insert(name.clone(), ts.clone());
