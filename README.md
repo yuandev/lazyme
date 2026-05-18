@@ -46,14 +46,14 @@ targets.toml        .deployd/config.toml
 
 Pre-built binaries from [GitHub Releases](https://github.com/yuandev/lazyme/releases). Choose your platform:
 
-- `deployd-x86_64-unknown-linux-gnu` — Linux x86_64
-- `deployd-aarch64-apple-darwin` — macOS Apple Silicon
+- `lazyme-x86_64-unknown-linux-gnu` — Linux x86_64
+- `lazyme-aarch64-apple-darwin` — macOS Apple Silicon
 
 ```bash
 # Example: macOS
-curl -L -o deployd https://github.com/yuandev/lazyme/releases/latest/download/deployd-aarch64-apple-darwin
-chmod +x deployd
-./deployd
+curl -L -o lazyme https://github.com/yuandev/lazyme/releases/latest/download/lazyme-aarch64-apple-darwin
+chmod +x lazyme
+./lazyme
 ```
 
 No dependencies needed — the frontend is embedded in the binary.
@@ -108,16 +108,16 @@ All fields are optional. CLI args override project config, project config overri
 
 ```bash
 # Watch all targets
-./deployd
+./lazyme
 
 # Watch specific targets
-./deployd my-api frontend
+./lazyme my-api frontend
 
 # Custom port and poll interval
-./deployd --port 9090 --interval 30
+./lazyme --port 9090 --interval 30
 
 # Custom remote name
-./deployd --remote upstream
+./lazyme --remote upstream
 ```
 
 Open **http://localhost:8080** for the dashboard.
@@ -197,8 +197,14 @@ Set `mode = "dev"` in `[run]` to skip the build step. On new commits, lazyme pul
 | `mode` | `deploy` | `"deploy"` (build + run) or `"dev"` (run only) |
 | `command` | none | Shell command. `{artifact}` and `{jvm_args}` are replaced at runtime |
 | `jvm_args` | none | JVM arguments |
-| `health_url` | none | Health check endpoint |
+| `health_url` | none | Health check endpoint. `{port}` is resolved from PID or jvm_args |
 | `health_timeout` | `30` | Seconds to wait for health check |
+| `kill_timeout_secs` | `30` | Graceful shutdown timeout before SIGKILL |
+| `build_timeout_secs` | `600` | Max build time before timeout |
+| `auto_restart` | `false` | Auto-restart crashed process on next poll |
+| `webhook_url` | none | Webhook URL for deploy success/failure notifications |
+| `pre_deploy_cmd` | none | Shell command run before build (e.g. backup, migration) |
+| `post_deploy_cmd` | none | Shell command run after successful deploy (e.g. warm cache) |
 
 #### `[env]`
 
@@ -258,9 +264,14 @@ my-project/
 
 ```json
 {"event":"build_started","target":"my-api","commit":"a1b2c3d","message":null}
+{"event":"build_log_start","target":"my-api","commit":"a1b2c3d","message":null}
+{"event":"build_output","target":"my-api","commit":"a1b2c3d","message":"[INFO] Compiling 2 source files..."}
+{"event":"build_log_end","target":"my-api","commit":"a1b2c3d","message":"success=true"}
 {"event":"build_complete","target":"my-api","commit":"a1b2c3d","message":"success=true"}
 {"event":"deploy_started","target":"my-api","commit":"a1b2c3d","message":null}
 {"event":"deploy_complete","target":"my-api","commit":"a1b2c3d","message":null}
+{"event":"rollback_started","target":"my-api","commit":"a1b2c3d","message":null}
+{"event":"rollback_complete","target":"my-api","commit":"a1b2c3d","message":null}
 {"event":"self_update_checking","target":"","commit":null,"message":null}
 {"event":"self_update_progress","target":"","commit":null,"message":"45"}
 {"event":"self_update_complete","target":"","commit":"0.1.5","message":null}

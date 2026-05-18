@@ -30,9 +30,9 @@ jobs:
 
       - name: Rename binary
         run: |
-          cp target/${{ matrix.target }}/release/deployd deployd-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/lazyme lazyme-${{ matrix.target }}
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: deployd-${{ matrix.target }}
+          files: lazyme-${{ matrix.target }}
           generate_release_notes: true
