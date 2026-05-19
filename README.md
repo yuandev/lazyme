@@ -288,6 +288,24 @@ my-project/
 {"event":"targets_changed","target":"my-clone","commit":null,"message":null}
 ```
 
+## Performance Monitoring
+
+Frontend includes a standard performance monitoring system. Click the `📊` button in the top navigation bar to open the performance panel:
+
+- **Web Vitals**: LCP / FID / INP / CLS core web vitals
+- **API Statistics**: Request count, average duration, slow request rate, error rate per endpoint
+- **Memory Monitoring**: JavaScript heap memory usage and limits
+
+Developer console command:
+```javascript
+logPerf()  // Print full performance report
+```
+
+Performance rating standards:
+- 🟢 **Good**: LCP < 2500ms, FID < 100ms, INP < 200ms, CLS < 0.1
+- 🟡 **Needs Improvement**: LCP < 4000ms, FID < 300ms, INP < 500ms, CLS < 0.25
+- 🔴 **Poor**: Exceeds the above thresholds
+
 ## Build from Source
 
 ```bash
