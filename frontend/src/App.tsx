@@ -9,6 +9,7 @@ import {
   restartServer, autoDeployToggle, stopTarget,
   setToken, wsToken, clearCache,
 } from './api';
+import { getMetrics } from './performance';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 import { I18nProvider, useI18n, tf } from './i18n';
 
@@ -43,6 +44,8 @@ function AppInner() {
   const [deleteStage, setDeleteStage] = useState<'confirm' | 'stopping' | 'deleting' | 'done'>('confirm');
   const [wsConnected, setWsConnected] = useState(false);
   const [targetTabs, setTargetTabs] = useState<Record<string, string>>({});
+  const [showPerfPanel, setShowPerfPanel] = useState(false);
+  const [perfSnapshot, setPerfSnapshot] = useState<any>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // Check for token in URL params
@@ -154,6 +157,7 @@ function AppInner() {
           <span style={S.updateHint}>{tf(t.versionAvailable, { version: update.version })}</span>
         )}
         <button onClick={toggleLang} style={S.langBtn}>{lang === 'en' ? '中' : 'EN'}</button>
+        <button onClick={() => { setPerfSnapshot(getMetrics()); setShowPerfPanel(true); }} style={S.perfBtn}>📊</button>
         {update.phase === 'downloading' ? (
           <div style={S.progressWrap}><div style={{ ...S.progressBar, width: `${update.progress}%` }} /><span style={S.progressText}>{update.progress}%</span></div>
         ) : update.phase === 'complete' ? (
@@ -234,6 +238,7 @@ function AppInner() {
       </div>
       {deleteTargetName && <DeleteDialog name={deleteTargetName} stage={deleteStage} t={t} lang={lang} onStage={setDeleteStage} onClose={() => { setDeleteTarget(null); setDeleteStage('confirm'); }} onDone={() => { setDeleteTarget(null); setDeleteStage('confirm'); }} />}
       {showCreate && <CreateModal onClose={() => setShowCreate(false)} onCreated={() => { setShowCreate(false); }} />}
+      {showPerfPanel && <PerformancePanel perf={perfSnapshot} onClose={() => setShowPerfPanel(false)} onRefresh={() => setPerfSnapshot(getMetrics())} />}
     </div>
   );
 }
@@ -356,6 +361,138 @@ function StatusSkeleton() {
         {[...Array(6)].map((_, i) => (
           <div key={i} style={{ height: 40, background: '#1a1a24', borderRadius: 6 }} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function PerformancePanel({ perf, onClose, onRefresh }: { perf: any; onClose: () => void; onRefresh: () => void }) {
+  const [tab, setTab] = useState<'vitals' | 'api' | 'memory'>('vitals');
+
+  const formatMs = (ms: number | null) => ms == null ? '—' : `${Math.round(ms)}ms`;
+  const formatMB = (bytes: number | null) => bytes == null ? '—' : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
+  const getVitalsColor = (key: string, value: number | null) => {
+    if (value == null) return '#6b7280';
+    const thresholds: Record<string, [number, number]> = {
+      lcp: [2500, 4000],
+      fid: [100, 300],
+      inp: [200, 500],
+    };
+    const [good, poor] = thresholds[key] || [100, 200];
+    if (key === 'cls') {
+      return value <= 0.1 ? '#22c55e' : value <= 0.25 ? '#f59e0b' : '#ef4444';
+    }
+    return value <= good ? '#22c55e' : value <= poor ? '#f59e0b' : '#ef4444';
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={{ ...S.modal, minWidth: 600, maxHeight: '80vh', overflow: 'auto' }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          <h3 style={{ fontSize: 18, fontWeight: 700, color: '#f1f5f9', margin: 0 }}>📊 Performance Monitor</h3>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={onRefresh} style={{ ...S.smallBtn, background: '#064e3b', color: '#6ee7b7' }}>Refresh</button>
+            <button onClick={onClose} style={{ ...S.smallBtn, background: '#1f1f2a', color: '#9ca3af' }}>✕</button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: '#0c0c10', borderRadius: 6, padding: 3 }}>
+          {(['vitals', 'api', 'memory'] as const).map(t => (
+            <button key={t} onClick={() => setTab(t)} style={{ ...S.tab, ...(tab === t ? S.tabActive : {}) }}>
+              {t === 'vitals' ? 'Web Vitals' : t === 'api' ? 'API Stats' : 'Memory'}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'vitals' && perf && (
+          <div>
+            <h4 style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Page Load</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8, marginBottom: 20 }}>
+              {['fp', 'fcp', 'lcp', 'domReady', 'ttfb'].map(key => (
+                <div key={key} style={{ background: '#111118', padding: '8px 12px', borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: '#6b7280' }}>{key.toUpperCase()}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: getVitalsColor(key, perf.webVitals[key as keyof typeof perf.webVitals]) }}>
+                    {formatMs(perf.pageLoad[key as keyof typeof perf.pageLoad])}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <h4 style={{ fontSize: 12, color: '#6b7280', margin: '0 0 12px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Core Web Vitals</h4>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
+              {Object.entries(perf.webVitals).map(([key, value]: [string, any]) => (
+                <div key={key} style={{ background: '#111118', padding: '8px 12px', borderRadius: 6 }}>
+                  <div style={{ fontSize: 11, color: '#6b7280' }}>{key.toUpperCase()}</div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: getVitalsColor(key, value) }}>
+                    {key === 'cls' ? (value == null ? '—' : value.toFixed(3)) : formatMs(value)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === 'api' && perf && (
+          <div>
+            {Object.keys(perf.apiMetrics).length === 0 ? (
+              <div style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>No API requests yet</div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {Object.entries(perf.apiMetrics).map(([name, stat]: [string, any]) => (
+                  <div key={name} style={{ background: '#111118', padding: '10px 12px', borderRadius: 6 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: '#f1f5f9', marginBottom: 4 }}>{name}</div>
+                    <div style={{ display: 'flex', gap: 16, fontSize: 11 }}>
+                      <span style={{ color: '#6b7280' }}>Count: <span style={{ color: '#9ca3af' }}>{stat.count}</span></span>
+                      <span style={{ color: '#6b7280' }}>Avg: <span style={{ color: '#60a5fa' }}>{Math.round(stat.totalTime / stat.count)}ms</span></span>
+                      {stat.slowCount > 0 && <span style={{ color: '#f59e0b' }}>Slow: {stat.slowCount}</span>}
+                      {stat.errorCount > 0 && <span style={{ color: '#ef4444' }}>Errors: {stat.errorCount}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === 'memory' && perf?.memory && (
+          <div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 20 }}>
+              <div style={{ background: '#111118', padding: '12px', borderRadius: 8, textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Used</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#60a5fa' }}>{formatMB(perf.memory.used)}</div>
+              </div>
+              <div style={{ background: '#111118', padding: '12px', borderRadius: 8, textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Total</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#8b5cf6' }}>{formatMB(perf.memory.total)}</div>
+              </div>
+              <div style={{ background: '#111118', padding: '12px', borderRadius: 8, textAlign: 'center' }}>
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Limit</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: '#f59e0b' }}>{formatMB(perf.memory.limit)}</div>
+              </div>
+            </div>
+            {perf.memory.limit && (
+              <div>
+                <div style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>Usage</div>
+                <div style={{ height: 12, background: '#1a1a24', borderRadius: 6, overflow: 'hidden' }}>
+                  <div style={{
+                    width: `${(perf.memory.used / perf.memory.limit * 100)}%`,
+                    height: '100%',
+                    background: (perf.memory.used / perf.memory.limit) > 0.8 ? '#ef4444' : '#22c55e',
+                    transition: 'width 0.3s',
+                  }} />
+                </div>
+                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 4, textAlign: 'right' }}>
+                  {Math.round(perf.memory.used / perf.memory.limit * 100)}%
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ marginTop: 20, paddingTop: 12, borderTop: '1px solid #1f1f2a', fontSize: 11, color: '#6b7280' }}>
+          💡 Type <code style={{ background: '#1f1f2a', padding: '2px 6px', borderRadius: 4, fontFamily: 'monospace' }}>logPerf()</code> in console for detailed report
+        </div>
       </div>
     </div>
   );
@@ -717,6 +854,7 @@ const S: Record<string, React.CSSProperties> = {
   pulse: { width: 6, height: 6, borderRadius: '50%', background: '#fbbf24', animation: 'pulse 1.5s infinite', display: 'inline-block' },
   updateHint: { fontSize: 11, color: '#fbbf24', fontFamily: 'monospace' },
   langBtn: { padding: '3px 8px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 11, background: '#0c0c10', color: '#6b7280', fontFamily: 'monospace', fontWeight: 600 },
+  perfBtn: { padding: '3px 6px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 14, background: '#0c0c10', color: '#6b7280' },
   updateBtn: { padding: '4px 12px', border: '1px solid #1f1f2a', borderRadius: 6, cursor: 'pointer', fontSize: 12, background: '#0c0c10', color: '#9ca3af', fontWeight: 500 },
   progressWrap: { position: 'relative', width: 120, height: 26, background: '#111118', border: '1px solid #1f1f2a', borderRadius: 6, overflow: 'hidden' },
   progressBar: { position: 'absolute', top: 0, left: 0, height: '100%', background: '#065f46', transition: 'width 0.3s' },

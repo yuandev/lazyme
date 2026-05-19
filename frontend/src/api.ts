@@ -1,3 +1,5 @@
+// Performance monitoring is integrated directly in apiFetch
+
 export interface DeployRecord {
   commit_hash: string;
   short_hash: string;
@@ -125,12 +127,48 @@ export function setToken(t: string) { sessionStorage.setItem('lazyme_token', t);
 export function clearToken() { sessionStorage.removeItem('lazyme_token'); }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(`${API}${path}`, {
-    ...init,
-    headers: { ...authHeaders(), ...(init?.headers || {}) },
+  const start = performance.now();
+  const method = init?.method || 'GET';
+  try {
+    const res = await fetch(`${API}${path}`, {
+      ...init,
+      headers: { ...authHeaders(), ...(init?.headers || {}) },
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); }
+    const duration = performance.now() - start;
+    const statKey = `${method} ${path.split('/').slice(0, 3).join('/')}`;
+    const existing = apiMetrics.get(statKey) || { count: 0, totalTime: 0, slowCount: 0, errorCount: 0 };
+    existing.count++;
+    existing.totalTime += duration;
+    if (duration > 1000) existing.slowCount++;
+    if (!res.ok) existing.errorCount++;
+    apiMetrics.set(statKey, existing);
+    return res;
+  } catch (err) {
+    const duration = performance.now() - start;
+    const statKey = `${method} ${path.split('/').slice(0, 3).join('/')}`;
+    const existing = apiMetrics.get(statKey) || { count: 0, totalTime: 0, slowCount: 0, errorCount: 0 };
+    existing.count++;
+    existing.totalTime += duration;
+    existing.errorCount++;
+    apiMetrics.set(statKey, existing);
+    throw err;
+  }
+}
+
+export const apiMetrics = new Map<string, { count: number; totalTime: number; slowCount: number; errorCount: number }>();
+
+export function getApiPerformanceSummary() {
+  const result: Record<string, any> = {};
+  apiMetrics.forEach((stat, name) => {
+    result[name] = {
+      count: stat.count,
+      avgTime: Math.round(stat.totalTime / stat.count),
+      slowRate: `${Math.round(stat.slowCount / stat.count * 100)}%`,
+      errorRate: `${Math.round(stat.errorCount / stat.count * 100)}%`,
+    };
   });
-  if (res.status === 401) { clearToken(); window.location.reload(); }
-  return res;
+  return result;
 }
 
 function apiPath(name: string): string { return `/targets/${encodeURIComponent(name)}`; }
