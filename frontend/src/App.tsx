@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   fetchTargets, fetchTargetStatus, fetchTargetCommits, fetchTargetHistory,
   fetchTargetLogs, deployTarget, rollbackTarget, switchBranch, fetchBranches,
@@ -7,7 +7,7 @@ import {
   fetchConfig, saveConfig, fetchMavenSettings, saveMavenSettings, fetchLocalRepo,
   fetchViteConfig, saveViteConfig, fetchEnv, saveEnv,
   restartServer, autoDeployToggle, stopTarget,
-  setToken, wsToken,
+  setToken, wsToken, clearCache,
 } from './api';
 import type { TargetSummary, StatusResponse, CommitInfo, DeployRecord } from './api';
 import { I18nProvider, useI18n, tf } from './i18n';
@@ -42,6 +42,7 @@ function AppInner() {
   const [deleteTargetName, setDeleteTarget] = useState<string | null>(null);
   const [deleteStage, setDeleteStage] = useState<'confirm' | 'stopping' | 'deleting' | 'done'>('confirm');
   const [wsConnected, setWsConnected] = useState(false);
+  const [targetTabs, setTargetTabs] = useState<Record<string, string>>({});
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
   // Check for token in URL params
@@ -57,6 +58,16 @@ function AppInner() {
     const q = await fetchQueue();
     setBuilding(q.building);
   }, []);
+
+  const groupedTargets = useMemo(() => {
+    const groups = new Map<string | null, TargetSummary[]>();
+    for (const tg of targets) {
+      const g = tg.group || null;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g)!.push(tg);
+    }
+    return [...groups.entries()].sort(([a], [b]) => (a || '~').localeCompare(b || '~'));
+  }, [targets]);
 
   useEffect(() => {
     fetchVersion().then(v => setCurrentVersion(v.version));
@@ -167,19 +178,12 @@ function AppInner() {
             if (totalKb === 0) return null;
             return <div style={{ fontSize: 11, color: '#60a5fa', fontFamily: 'monospace', padding: '0 4px 8px' }}>MEM {formatMemory(totalKb)}</div>;
           })()}
-          {(() => {
-            const groups = new Map<string | null, TargetSummary[]>();
-            for (const tg of targets) {
-              const g = tg.group || null;
-              if (!groups.has(g)) groups.set(g, []);
-              groups.get(g)!.push(tg);
-            }
-            return [...groups.entries()].sort(([a], [b]) => (a || '~').localeCompare(b || '~')).map(([group, items]) => (
-              <div key={group || '__u__'} style={{ marginBottom: 8 }}>
-                <div style={S.groupLabel}>{group || t.dash}</div>
-                {items.map(tg => (
-                  <div key={tg.name} style={S.targetRow}>
-                    <button onClick={() => setSelected(tg.name)} style={{ ...S.targetCard, ...(selected === tg.name ? S.targetCardActive : {}) }}>
+          {groupedTargets.map(([group, items]) => (
+            <div key={group || '__u__'} style={{ marginBottom: 8 }}>
+              <div style={S.groupLabel}>{group || t.dash}</div>
+              {items.map(tg => (
+                <div key={tg.name} style={S.targetRow}>
+                  <button onClick={() => setSelected(tg.name)} style={{ ...S.targetCard, ...(selected === tg.name ? S.targetCardActive : {}) }}>
                       <div style={S.targetTop}>
                         <span style={S.targetName}>{tg.label || tg.name}</span>
                         <span style={isOnline(tg) ? S.badgeOn : S.badgeOff}>{isOnline(tg) ? '● ' + t.online : '○ ' + t.offline}</span>
@@ -207,12 +211,11 @@ function AppInner() {
                     </button>
                     <button onClick={() => setDeleteTarget(tg.name)} style={{ ...S.cloneBtn, borderColor: '#450a0a' }} title={t.delete}>
                       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#f87171" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ));
-          })()}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ))}
         </aside>
         <main style={S.main}>
           {liveLog && (
@@ -226,7 +229,7 @@ function AppInner() {
               <pre style={S.liveLog}><code>{liveLines.join('\n')}<div ref={logEndRef} /></code></pre>
             </div>
           )}
-          {selected ? <TargetDetail name={selected} /> : <NoSelection />}
+          {selected ? <TargetDetail name={selected} targetTabs={targetTabs} setTargetTabs={setTargetTabs} /> : <NoSelection />}
         </main>
       </div>
       {deleteTargetName && <DeleteDialog name={deleteTargetName} stage={deleteStage} t={t} lang={lang} onStage={setDeleteStage} onClose={() => { setDeleteTarget(null); setDeleteStage('confirm'); }} onDone={() => { setDeleteTarget(null); setDeleteStage('confirm'); }} />}
@@ -344,9 +347,33 @@ function NoSelection() {
   );
 }
 
-function TargetDetail({ name }: { name: string }) {
+function StatusSkeleton() {
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ height: 24, background: '#1a1a24', borderRadius: 4, marginBottom: 20, width: '40%' }} />
+      <div style={{ height: 80, background: '#1a1a24', borderRadius: 8, marginBottom: 16 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 16 }}>
+        {[...Array(6)].map((_, i) => (
+          <div key={i} style={{ height: 40, background: '#1a1a24', borderRadius: 6 }} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TargetDetail({ name, targetTabs, setTargetTabs }: { 
+  name: string; 
+  targetTabs: Record<string, string>;
+  setTargetTabs: (tabs: Record<string, string>) => void;
+}) {
   const { t } = useI18n();
-  const [tab, setTab] = useState<'status' | 'commits' | 'history' | 'config'>('status');
+  const [tab, setTab] = useState<'status' | 'commits' | 'history' | 'config'>(
+    (targetTabs[name] as any) || 'status'
+  );
+
+  useEffect(() => {
+    setTargetTabs({ ...targetTabs, [name]: tab });
+  }, [name, tab]);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [history, setHistory] = useState<DeployRecord[]>([]);
@@ -361,6 +388,7 @@ function TargetDetail({ name }: { name: string }) {
   const [fetching, setFetching] = useState(false);
 
   const refresh = useCallback(async () => {
+    clearCache(name);
     const [s, c, h] = await Promise.all([fetchTargetStatus(name), fetchTargetCommits(name), fetchTargetHistory(name)]);
     setStatus(s); setCommits(c); setHistory(h);
     if (s.branch && !branchSel) setBranchSel(s.branch);
@@ -379,7 +407,7 @@ function TargetDetail({ name }: { name: string }) {
     { key: 'config' as const, label: t.config, icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg> },
   ];
 
-  if (!status) return <div style={{ textAlign: 'center', padding: 48, color: '#6b7280' }}>{t.loading}</div>;
+  if (!status) return <StatusSkeleton />;
 
   return (
     <div>

@@ -80,6 +80,32 @@ export interface QueueResponse {
 
 const API = '/api';
 
+const CACHE_TTL = 30000;
+const statusCache = new Map<string, { data: StatusResponse; time: number }>();
+const commitsCache = new Map<string, { data: CommitInfo[]; time: number }>();
+const historyCache = new Map<string, { data: DeployRecord[]; time: number }>();
+const branchesCache = new Map<string, { data: BranchesResponse; time: number }>();
+
+function getCached<T>(cache: Map<string, { data: T; time: number }>, key: string): T | null {
+  const entry = cache.get(key);
+  if (entry && Date.now() - entry.time < CACHE_TTL) return entry.data;
+  return null;
+}
+
+export function clearCache(name?: string) {
+  if (name) {
+    statusCache.delete(name);
+    commitsCache.delete(name);
+    historyCache.delete(name);
+    branchesCache.delete(name);
+  } else {
+    statusCache.clear();
+    commitsCache.clear();
+    historyCache.clear();
+    branchesCache.clear();
+  }
+}
+
 function token(): string | null {
   return sessionStorage.getItem('lazyme_token');
 }
@@ -117,19 +143,29 @@ export async function fetchTargets(): Promise<TargetSummary[]> {
 }
 
 export async function fetchTargetStatus(name: string): Promise<StatusResponse> {
+  const cached = getCached(statusCache, name);
+  if (cached) return cached;
   const res = await apiFetch(`${apiPath(name)}/status`);
-  return res.json();
+  const data = await res.json();
+  statusCache.set(name, { data, time: Date.now() });
+  return data;
 }
 
 export async function fetchTargetCommits(name: string): Promise<CommitInfo[]> {
+  const cached = getCached(commitsCache, name);
+  if (cached) return cached;
   const res = await apiFetch(`${apiPath(name)}/commits`);
   const data: CommitsResponse = await res.json();
+  commitsCache.set(name, { data: data.commits, time: Date.now() });
   return data.commits;
 }
 
 export async function fetchTargetHistory(name: string): Promise<DeployRecord[]> {
+  const cached = getCached(historyCache, name);
+  if (cached) return cached;
   const res = await apiFetch(`${apiPath(name)}/history`);
   const data: HistoryResponse = await res.json();
+  historyCache.set(name, { data: data.history, time: Date.now() });
   return data.history;
 }
 
@@ -142,26 +178,35 @@ export async function fetchTargetLogs(name: string, hash: string): Promise<strin
 
 export async function deployTarget(name: string): Promise<void> {
   await apiFetch(`${apiPath(name)}/deploy`, { method: 'POST' });
+  clearCache(name);
 }
 
 export async function rollbackTarget(name: string, commit: string): Promise<void> {
   await apiFetch(`${apiPath(name)}/rollback`, { method: 'POST', headers: hdr(), body: JSON.stringify({ commit }) });
+  clearCache(name);
 }
 
 export async function switchBranch(name: string, branch: string): Promise<void> {
   await apiFetch(`${apiPath(name)}/branch`, { method: 'POST', headers: hdr(), body: JSON.stringify({ branch }) });
+  clearCache(name);
 }
 
 export interface BranchesResponse { branches: string[]; current: string; }
 
 export async function fetchBranches(name: string): Promise<BranchesResponse> {
+  const cached = getCached(branchesCache, name);
+  if (cached) return cached;
   const res = await apiFetch(`${apiPath(name)}/branches`);
-  return res.json();
+  const data = await res.json();
+  branchesCache.set(name, { data, time: Date.now() });
+  return data;
 }
 
 export async function fetchTarget(name: string): Promise<{ status: string; remote_head: string }> {
   const res = await apiFetch(`${apiPath(name)}/fetch`, { method: 'POST' });
-  return res.json();
+  const data = await res.json();
+  clearCache(name);
+  return data;
 }
 
 export async function cloneTarget(name: string, newName: string, repo?: string): Promise<{ status: string; name: string }> {
@@ -232,11 +277,13 @@ export async function fetchEnv(name: string): Promise<EnvResponse> {
 
 export async function stopTarget(name: string): Promise<{ status: string }> {
   const res = await apiFetch(`${apiPath(name)}/stop`, { method: 'POST' });
+  clearCache(name);
   return res.json();
 }
 
 export async function autoDeployToggle(name: string): Promise<{ status: string; auto_deploy_paused: boolean }> {
   const res = await apiFetch(`${apiPath(name)}/auto-deploy`, { method: 'POST' });
+  clearCache(name);
   return res.json();
 }
 
