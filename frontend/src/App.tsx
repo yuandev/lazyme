@@ -169,7 +169,9 @@ function AppInner() {
           </button>
         )}
         <button onClick={toggleLang} style={S.langBtn}>{lang === 'en' ? '中' : 'EN'}</button>
-        <button onClick={() => { setPerfSnapshot(getMetrics()); setShowPerfPanel(true); }} style={S.perfBtn} title="Performance Monitor">📊</button>
+        <button onClick={() => { setPerfSnapshot(getMetrics()); setShowPerfPanel(true); }} style={S.perfBtn} title="Performance Monitor">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="12" width="4" height="8" rx="1"/><rect x="10" y="7" width="4" height="13" rx="1"/><rect x="17" y="3" width="4" height="17" rx="1"/></svg>
+        </button>
       </header>
       <div style={S.body}>
         <aside style={S.sidebar}>
@@ -855,9 +857,9 @@ const S: Record<string, React.CSSProperties> = {
   buildingBadge: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 6, fontSize: 12, background: '#1a1a0a', color: '#fbbf24', border: '1px solid #2d2d10' },
   pulse: { width: 6, height: 6, borderRadius: '50%', background: '#fbbf24', animation: 'pulse 1.5s infinite', display: 'inline-block' },
   updateHint: { fontSize: 11, color: '#fbbf24', fontFamily: 'monospace' },
-  langBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 8px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 11, background: '#0c0c10', color: '#6b7280', fontFamily: 'monospace', fontWeight: 600 },
-  perfBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 14, background: '#0c0c10', color: '#60a5fa', transition: 'all 0.15s' },
-  updateBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 12px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 12, background: '#0c0c10', color: '#9ca3af', fontWeight: 500 },
+  langBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 8px', border: '1px solid #2d2d3a', borderRadius: 4, cursor: 'pointer', fontSize: 11, background: '#0c0c10', color: '#9ca3af', fontFamily: 'monospace', fontWeight: 600, transition: 'all 0.15s' },
+  perfBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, border: '1px solid #2d2d3a', borderRadius: 4, cursor: 'pointer', background: '#0c0c10', transition: 'all 0.15s' },
+  updateBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 12px', border: '1px solid #2d2d3a', borderRadius: 4, cursor: 'pointer', fontSize: 12, background: '#0c0c10', color: '#9ca3af', fontWeight: 500, transition: 'all 0.15s' },
   progressWrap: { position: 'relative', width: 120, height: 26, background: '#111118', border: '1px solid #1f1f2a', borderRadius: 6, overflow: 'hidden' },
   progressBar: { position: 'absolute', top: 0, left: 0, height: '100%', background: '#065f46', transition: 'width 0.3s' },
   progressText: { position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 11, color: '#d1d5db', fontFamily: 'monospace' },
