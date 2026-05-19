@@ -146,18 +146,18 @@ function AppInner() {
     <div style={S.container}>
       <header style={S.header}>
         <div style={S.headerLeft}>
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/><path d="M14.5 8.5 21 3"/></svg>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/><path d="M14.5 8.5 21 3"/></svg>
           <span style={S.logoText}>lazyme</span>
           <span style={S.versionChip}>v{currentVersion}</span>
-          <span style={{ fontSize: 10, color: wsConnected ? '#4ade80' : '#f87171' }}>{wsConnected ? '●' : '○'}</span>
+          <span style={{ fontSize: 10, color: wsConnected ? '#4ade80' : '#ef4444' }}>{wsConnected ? '●' : '○'}</span>
         </div>
         <div style={{ flex: 1 }} />
-        {building && <span style={S.buildingBadge}><span style={S.pulse} />{t.building} {building}</span>}
-        {update.version && !update.phase && (
-          <span style={S.updateHint}>{tf(t.versionAvailable, { version: update.version })}</span>
-        )}
-        <button onClick={toggleLang} style={S.langBtn}>{lang === 'en' ? '中' : 'EN'}</button>
-        <button onClick={() => { setPerfSnapshot(getMetrics()); setShowPerfPanel(true); }} style={S.perfBtn}>📊</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginRight: 'auto' }}>
+          {building && <span style={S.buildingBadge}><span style={S.pulse} />{t.building} {building}</span>}
+          {update.version && !update.phase && (
+            <span style={S.updateHint}>{tf(t.versionAvailable, { version: update.version })}</span>
+          )}
+        </div>
         {update.phase === 'downloading' ? (
           <div style={S.progressWrap}><div style={{ ...S.progressBar, width: `${update.progress}%` }} /><span style={S.progressText}>{update.progress}%</span></div>
         ) : update.phase === 'complete' ? (
@@ -168,6 +168,8 @@ function AppInner() {
             {update.phase === 'checking' ? t.checking : update.phase === 'error' ? t.error : update.version ? tf(t.updateTo, { version: update.version }) : update.error ? t.upToDate : t.update}
           </button>
         )}
+        <button onClick={toggleLang} style={S.langBtn}>{lang === 'en' ? '中' : 'EN'}</button>
+        <button onClick={() => { setPerfSnapshot(getMetrics()); setShowPerfPanel(true); }} style={S.perfBtn} title="Performance Monitor">📊</button>
       </header>
       <div style={S.body}>
         <aside style={S.sidebar}>
@@ -853,9 +855,9 @@ const S: Record<string, React.CSSProperties> = {
   buildingBadge: { display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 6, fontSize: 12, background: '#1a1a0a', color: '#fbbf24', border: '1px solid #2d2d10' },
   pulse: { width: 6, height: 6, borderRadius: '50%', background: '#fbbf24', animation: 'pulse 1.5s infinite', display: 'inline-block' },
   updateHint: { fontSize: 11, color: '#fbbf24', fontFamily: 'monospace' },
-  langBtn: { padding: '3px 8px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 11, background: '#0c0c10', color: '#6b7280', fontFamily: 'monospace', fontWeight: 600 },
-  perfBtn: { padding: '3px 6px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 14, background: '#0c0c10', color: '#6b7280' },
-  updateBtn: { padding: '4px 12px', border: '1px solid #1f1f2a', borderRadius: 6, cursor: 'pointer', fontSize: 12, background: '#0c0c10', color: '#9ca3af', fontWeight: 500 },
+  langBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 8px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 11, background: '#0c0c10', color: '#6b7280', fontFamily: 'monospace', fontWeight: 600 },
+  perfBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 14, background: '#0c0c10', color: '#60a5fa', transition: 'all 0.15s' },
+  updateBtn: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: 26, padding: '0 12px', border: '1px solid #1f1f2a', borderRadius: 4, cursor: 'pointer', fontSize: 12, background: '#0c0c10', color: '#9ca3af', fontWeight: 500 },
   progressWrap: { position: 'relative', width: 120, height: 26, background: '#111118', border: '1px solid #1f1f2a', borderRadius: 6, overflow: 'hidden' },
   progressBar: { position: 'absolute', top: 0, left: 0, height: '100%', background: '#065f46', transition: 'width 0.3s' },
   progressText: { position: 'relative', zIndex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 11, color: '#d1d5db', fontFamily: 'monospace' },
@@ -864,7 +866,7 @@ const S: Record<string, React.CSSProperties> = {
   main: { flex: 1, padding: 20, overflow: 'auto' },
   groupLabel: { fontSize: 10, color: '#4b5563', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700, padding: '8px 8px 4px' },
   targetRow: { display: 'flex', alignItems: 'center', gap: 4 },
-  targetCard: { display: 'block', width: '100%', textAlign: 'left', padding: '10px 10px', border: '1px solid transparent', borderRadius: 8, cursor: 'pointer', background: 'transparent', color: '#d1d5db', marginBottom: 2, transition: 'all 0.15s' },
+  targetCard: { display: 'block', width: '100%', textAlign: 'left', padding: '8px 10px', border: '1px solid transparent', borderRadius: 6, cursor: 'pointer', background: 'transparent', color: '#d1d5db', marginBottom: 2, transition: 'all 0.15s' },
   targetCardActive: { background: '#13131a', borderColor: '#1f1f2a' },
   targetTop: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
   targetName: { fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
@@ -889,8 +891,8 @@ const S: Record<string, React.CSSProperties> = {
   hashCode: { color: '#93c5fd', fontFamily: 'monospace', fontSize: 12, background: '#111827', padding: '1px 6px', borderRadius: 4 },
   deployMark: { fontSize: 10, color: '#4ade80', fontWeight: 600, background: '#052e16', padding: '1px 6px', borderRadius: 4 },
   lightTag: { fontSize: 10, color: '#60a5fa', background: '#111827', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' },
-  primaryBtn: { display: 'inline-flex', alignItems: 'center', gap: 6, padding: '7px 16px', border: 'none', borderRadius: 7, cursor: 'pointer', fontSize: 13, fontWeight: 600, background: '#166534', color: '#86efac' },
-  smallBtn: { padding: '4px 10px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 500, background: '#1f1f2a', color: '#9ca3af' },
+  primaryBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, height: 32, padding: '0 16px', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600, background: '#166534', color: '#86efac' },
+  smallBtn: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24, padding: '0 10px', border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 500, background: '#1f1f2a', color: '#9ca3af' },
   textarea: { width: '100%', minHeight: 200, background: '#09090b', color: '#d1d5db', border: '1px solid #1f1f2a', borderRadius: 8, padding: 12, fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', Menlo, monospace", fontSize: 12, resize: 'vertical', lineHeight: 1.6, outline: 'none' },
   inputField: { width: '100%', background: '#09090b', color: '#d1d5db', border: '1px solid #1f1f2a', borderRadius: 8, padding: '8px 12px', fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', Menlo, monospace", fontSize: 13, outline: 'none' },
   select: { padding: '5px 10px', border: '1px solid #1f1f2a', borderRadius: 6, background: '#09090b', color: '#d1d5db', fontSize: 12, fontFamily: 'monospace', outline: 'none', maxWidth: 200 },
